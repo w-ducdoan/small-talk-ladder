@@ -2,6 +2,9 @@ import * as db from "./store.js";
 import * as ai from "./ai.js";
 import * as media from "./media.js";
 import { SKILLS, LEVELS, DEPTH, SETTINGS, KIND, TOPICS, KNOW_COLD } from "./curriculum.js";
+import { BANK_A } from "./quiz-bank-a.js";
+import { BANK_B } from "./quiz-bank-b.js";
+const QUIZ_BANK = { ...BANK_A, ...BANK_B };
 
 /* ---------- Helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -38,7 +41,7 @@ const obj = (props) => ({ type: "object", properties: props, required: Object.ke
 /* ---------- State ---------- */
 const S = {
   settings: { apiKey: "", model: ai.DEFAULT_MODEL, voice: "", rate: 1, voiceMode: false, about: "" },
-  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {},
+  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {}, spend: { months: {} },
   live: null, busy: "", flash: "", view: "today", quiz: null, drill: null, lookup: null, ctl: null
 };
 const VIEWS = ["today", "cold", "film", "plan", "progress", "phrases", "settings"];
@@ -64,6 +67,7 @@ async function loadAll() {
   S.settings = { ...S.settings, ...(kvm.settings || {}), apiKey: kvm.apiKey || "" };
   S.profile = kvm.profile || null;
   S.knowCold = kvm.knowCold || {};
+  S.spend = kvm.spend || { months: {} };
   const byNew = (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt);
   S.plans = plans.sort(byNew); S.sessions = sessions.sort(byNew); S.phrases = phrases; S.recordings = recordings.sort(byNew);
   ai.configure({ apiKey: S.settings.apiKey, modelId: S.settings.model });
@@ -93,6 +97,30 @@ async function seedPlan() {
     week_summary: ""
   };
   await db.put("plans", plan); S.plans = [plan];
+}
+
+/* ---------- Spend meter ---------- */
+const FEATURE_LABEL = { rep: "Conversation reps", plan: "Plan updates", quiz: "Quiz feedback", video: "Video drills", lookup: "Phrase lookups", other: "Other" };
+const monthKey = (d = new Date()) => d.getFullYear() + "-" + z(d.getMonth() + 1);
+ai.onUsage(({ feature, cost, searches }) => {
+  const m = S.spend.months[monthKey()] ||= { total: 0, calls: 0, searches: 0, byFeature: {} };
+  m.total += cost; m.calls += 1; m.searches += searches;
+  m.byFeature[feature] = (m.byFeature[feature] || 0) + cost;
+  db.kvSet("spend", S.spend).catch(() => {});
+  renderMini();
+});
+const money = n => n < 0.01 ? "$" + n.toFixed(4) : "$" + n.toFixed(2);
+function spendCard() {
+  const m = S.spend.months[monthKey()];
+  const months = Object.entries(S.spend.months).sort((a, b) => b[0].localeCompare(a[0]));
+  const allTime = months.reduce((a, [, v]) => a + v.total, 0);
+  return h("article", { class: "card" }, h("h3", { text: "Spend meter" }),
+    h("div", { class: "stats" },
+      h("div", { class: "stat" }, h("span", { class: "v num", text: money(m?.total || 0) }), h("span", { class: "k", text: "This month" })),
+      h("div", { class: "stat" }, h("span", { class: "v num", text: m?.calls || 0 }), h("span", { class: "k", text: "Claude calls this month" })),
+      h("div", { class: "stat" }, h("span", { class: "v num", text: money(allTime) }), h("span", { class: "k", text: "All time in this browser" }))),
+    m ? h("ul", { class: "clean small num" }, Object.entries(m.byFeature).sort((a, b) => b[1] - a[1]).map(([f, c]) => h("li", { text: (FEATURE_LABEL[f] || f) + ": " + money(c) }))) : h("p", { class: "small muted", text: "Nothing spent yet this month. Quizzes from the built-in question bank are free." }),
+    h("p", { class: "small muted", text: "Estimated from the token counts each reply reports, at list prices. Your Anthropic Console is the official bill." }));
 }
 
 /* ---------- Adaptive engine ---------- */
@@ -224,7 +252,7 @@ ${card ? "- Reference facts for this topic (use for the primer where useful): " 
 ${recent.length ? "- Do not repeat these recent scenarios: " + recent.join("; ") : ""}
 Place it in a realistic moment from the learner's own life as described above (work, school, recruiting coffee chats, team dinners, events). Use invented names, never real people.
 Do not invent specific recent scores, trades, standings or news. The primer is evergreen facts plus how Americans usually talk about the topic, 3-4 short items.
-The goal must make the learner practice the target skill specifically. "try" holds 3 lines or questions the learner could use. "others" is empty unless the setting has more than two people. "turns" is how many exchanges, 6-12.`, SCHEMA.scenario);
+The goal must make the learner practice the target skill specifically. "try" holds 3 lines or questions the learner could use. "others" is empty unless the setting has more than two people. "turns" is how many exchanges, 6-12.`, SCHEMA.scenario, { feature: "rep" });
     const sc = {
       title: String(r.title || "Today's rep").slice(0, 90), situation: String(r.situation || ""),
       partner: { name: String(r.partner?.name || "Alex"), role: String(r.partner?.role || "a colleague"), vibe: String(r.partner?.vibe || "") },
@@ -294,7 +322,7 @@ ${transcript.slice(-12000)}
 Measured: ${m.questions} questions over ${m.turns} turns; the learner's share of words ${m.share}%.
 ${RUBRIC}
 Judge relative to the partner level. The target skill score is required; score other skills only where the transcript clearly shows them, else null.
-Give 2-4 rewrites ("said" must quote the learner exactly), favoring lines that sound translated or moves they missed. Give 1-3 phrases worth learning for this topic. topic_comfort is 1-5. next_time is one concrete thing to try next session.`, SCHEMA.debrief), L.next.skill);
+Give 2-4 rewrites ("said" must quote the learner exactly), favoring lines that sound translated or moves they missed. Give 1-3 phrases worth learning for this topic. topic_comfort is 1-5. next_time is one concrete thing to try next session.`, SCHEMA.debrief, { feature: "rep" }), L.next.skill);
     await saveRep(L, d, m);
   });
 }
@@ -396,7 +424,7 @@ ${sess}
 Recent scored videos:
 ${vids}
 Request: ${ask}
-Rules: focus_skills holds 1-3 keys from [${Object.keys(SKILLS).join(", ")}], usually the weakest unless the learner asked otherwise. topics holds 2-5 keys from [${Object.keys(TOPICS).join(", ")}]. partner_level_override is null, or 1-6 only when the learner asked to jump to or hold a level; override_until is YYYY-MM-DD or null. sessions_per_week is 3-7, lighter when the learner says a week is heavy. Keep anything the learner did not ask to change. Every change needs a reason a person would accept, citing evidence from the reps or the calendar. notes holds 2-4 short coaching notes.`, SCHEMA.plan);
+Rules: focus_skills holds 1-3 keys from [${Object.keys(SKILLS).join(", ")}], usually the weakest unless the learner asked otherwise. topics holds 2-5 keys from [${Object.keys(TOPICS).join(", ")}]. partner_level_override is null, or 1-6 only when the learner asked to jump to or hold a level; override_until is YYYY-MM-DD or null. sessions_per_week is 3-7, lighter when the learner says a week is heavy. Keep anything the learner did not ask to change. Every change needs a reason a person would accept, citing evidence from the reps or the calendar. notes holds 2-4 short coaching notes.`, SCHEMA.plan, { feature: "plan" });
     const doc = {
       id: db.uid("plan"), createdAt: new Date().toISOString(), source: mode === "weekly" ? "Weekly review" : "Your request", request: request || null,
       headline: String(r.headline || "This week's plan").slice(0, 160), focus_skills: strArr(r.focus_skills, 3).filter(k => SKILLS[k]),
@@ -419,7 +447,57 @@ async function restorePlan(old) {
 }
 
 /* ---------- Know Cold quiz ---------- */
+const shuffle = arr => { const b = [...arr]; for (let i = b.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [b[i], b[j]] = [b[j], b[i]]; } return b; };
+const bankLeft = key => { const seen = new Set(S.knowCold[key]?.seen || []); return (QUIZ_BANK[key] || []).filter((_, i) => !seen.has(i)).length; };
+async function saveQuizScore(key, score, seenIdx) {
+  const prev = S.knowCold[key] || { status: "new", scores: [], seen: [] };
+  const scores = [...(prev.scores || []), clamp(score, 0, 5)].slice(-6);
+  const last2 = scores.slice(-2);
+  const status = last2.length === 2 && last2.every(x => x >= 4) ? "cold" : "learning";
+  const seen = [...new Set([...(prev.seen || []), ...seenIdx])];
+  S.knowCold = { ...S.knowCold, [key]: { status, scores, seen, lastQuiz: new Date().toISOString() } };
+  await db.kvSet("knowCold", S.knowCold);
+}
+// Free quiz from the built-in bank: 3 multiple choice (graded instantly) and 2 "say it back" (self-rated).
 function startQuiz(card) {
+  stopMic();
+  const bank = QUIZ_BANK[card.key] || [];
+  const seen = new Set(S.knowCold[card.key]?.seen || []);
+  const fresh = bank.map((q, i) => ({ q, i })).filter(x => !seen.has(x.i));
+  if (!fresh.length) { S.quiz = { key: card.key, mode: "empty" }; renderCold(); return; }
+  let pick = [...shuffle(fresh.filter(x => x.q.o)).slice(0, 3), ...shuffle(fresh.filter(x => x.q.s)).slice(0, 2)];
+  if (pick.length < 5) pick = [...pick, ...shuffle(fresh.filter(x => !pick.includes(x))).slice(0, 5 - pick.length)];
+  const items = pick.map(({ q, i }) => q.o
+    ? { i, kind: "mc", q: q.q, opts: shuffle(q.o.map((t, k) => ({ t, right: k === q.a }))), why: q.w || "", choice: null }
+    : { i, kind: "say", s: q.s, model: q.a, answer: "", rating: null, feedback: "" });
+  S.quiz = { key: card.key, mode: "bank", items, phase: "answer" };
+  renderCold();
+}
+function checkBankQuiz(card) {
+  stopMic();
+  const q = S.quiz;
+  if (q.items.some(it => it.kind === "mc" && it.choice == null)) { flash("Pick an answer for each multiple-choice question."); return; }
+  q.phase = "check"; S.flash = ""; renderStatus();
+  finishIfRated(card);
+}
+async function finishIfRated(card) {
+  const q = S.quiz;
+  if (!q || q.phase !== "check" || q.items.some(it => it.kind === "say" && !it.rating)) { renderCold(); return; }
+  const pts = q.items.reduce((a, it) => a + (it.kind === "mc" ? (it.opts[it.choice]?.right ? 1 : 0) : it.rating === "right" ? 1 : it.rating === "partly" ? 0.5 : 0), 0);
+  q.score = Math.floor(pts); q.phase = "done";
+  await saveQuizScore(card.key, q.score, q.items.map(it => it.i));
+  renderCold();
+}
+function sayFeedback(card) {
+  const q = S.quiz, says = q.items.filter(it => it.kind === "say");
+  return guard("grade", async () => {
+    const r = await ai.askJSON(`Grade these small-talk replies on "${card.title}" for someone learning American small talk. Be fair, not picky: spoken-style answers and recognition slips are fine. A reply is right if it would work naturally in a real American conversation; partly if it works but sounds stiff, translated or misses the follow-up; wrong if it would land badly.
+${says.map((x, n) => `Item ${n + 1}. Someone says: ${x.s}\nA strong reply: ${x.model}\nLearner's reply: ${x.answer || "(blank)"}`).join("\n\n")}
+Return one result per item in order. feedback is one or two sentences, and suggests a more natural phrasing when it helps. score counts right answers (partly = half, rounded down). tip is one sentence.`, SCHEMA.grade, { effort: "low", feature: "quiz" });
+    says.forEach((x, n) => { const v = r.results?.[n]; if (v) { x.feedback = v.feedback; if (!x.rating) x.rating = v.verdict; } });
+  }).then(() => finishIfRated(card));
+}
+function aiQuiz(card) {
   if (!ai.ready()) { setView("settings"); flash("Add your Anthropic API key first."); return; }
   return guard("quiz", async () => {
     const r = await ai.askJSON(`Write a 5-question quick quiz on "${card.title}" for someone learning American small talk.
@@ -427,24 +505,19 @@ Learner: ${learner()}
 Base every question on these reference facts only:
 ${card.essentials.map(e => "- " + e).join("\n")}
 Questions people ask: ${card.ask.join(" | ")}
-Mix the kinds: 3 "fact" questions (recall a fact they'd need in conversation) and 2 "respond" questions (someone says a line about this topic, and the learner writes what they'd say back). "ideal" is a short model answer.`, SCHEMA.quiz, { effort: "low" });
-    S.quiz = { key: card.key, questions: (r.questions || []).slice(0, 5), phase: "answer", results: null };
+Mix the kinds: 3 "fact" questions (recall a fact they'd need in conversation) and 2 "respond" questions (someone says a line about this topic, and the learner writes what they'd say back). "ideal" is a short model answer.`, SCHEMA.quiz, { effort: "low", feature: "quiz" });
+    S.quiz = { key: card.key, mode: "ai", questions: (r.questions || []).slice(0, 5), phase: "answer", results: null };
   });
 }
-function gradeQuiz(card, answers) {
+function gradeAiQuiz(card, answers) {
   return guard("grade", async () => {
     const q = S.quiz;
     const r = await ai.askJSON(`Grade this small-talk quiz on "${card.title}". Be fair, not picky: spoken-style answers and spelling slips are fine, and a "respond" answer is right if it would work naturally in a real American conversation.
 Reference facts: ${card.essentials.join(" ")}
 ${q.questions.map((x, i) => `Q${i + 1} (${x.kind}): ${x.q}\nModel answer: ${x.ideal}\nLearner's answer: ${answers[i] || "(blank)"}`).join("\n\n")}
-Return one result per question in order. score is the number right, counting each "partly" as half and rounding down. tip is one sentence on what to review.`, SCHEMA.grade, { effort: "low" });
+Return one result per question in order. score is the number right, counting each "partly" as half and rounding down. tip is one sentence on what to review.`, SCHEMA.grade, { effort: "low", feature: "quiz" });
     q.results = r; q.answers = answers; q.phase = "done";
-    const prev = S.knowCold[card.key] || { status: "new", scores: [] };
-    const scores = [...(prev.scores || []), clamp(r.score, 0, 5)].slice(-6);
-    const last2 = scores.slice(-2);
-    const status = last2.length === 2 && last2.every(x => x >= 4) ? "cold" : "learning";
-    S.knowCold = { ...S.knowCold, [card.key]: { status, scores, lastQuiz: new Date().toISOString() } };
-    await db.kvSet("knowCold", S.knowCold);
+    await saveQuizScore(card.key, r.score, []);
   });
 }
 
@@ -457,7 +530,7 @@ function newDrill() {
 Learner: ${learner()}
 Target skill: ${SKILLS[next.skill].label}. ${SKILLS[next.skill].desc}
 Topic: ${TOPICS[next.topic].label}. Today's date: ${localDate()}.
-"setup" says who is speaking and where (one sentence). "opener" is the line they say. "aim" says what a strong answer does. "include" lists 2-3 things to hit (for example a specific detail, a question back). "seconds" is the target length, 45-120.`, SCHEMA.drill, { effort: "low" });
+"setup" says who is speaking and where (one sentence). "opener" is the line they say. "aim" says what a strong answer does. "include" lists 2-3 things to hit (for example a specific detail, a question back). "seconds" is the target length, 45-120.`, SCHEMA.drill, { effort: "low", feature: "video" });
     S.drill = { phase: "ready", skill: next.skill, topic: next.topic, ...r, seconds: clamp(r.seconds || 60, 30, 180) };
   });
 }
@@ -503,7 +576,7 @@ Transcript (speech recognition; it may drop filler words and punctuation):
 ${rec.transcript.slice(-12000)}
 Measured pace: ${wpm ? wpm + " words per minute (natural conversation is roughly 130-170)" : "unknown"}.
 ${RUBRIC}
-${rec.skill ? "Target skill: " + rec.skill + ". Its score is required." : ""} Score other skills only where the transcript clearly shows them, else null. used_phrase is null. In "fix", include pacing advice if the pace is far outside the natural range. Give 2-4 rewrites quoting the learner exactly, and 1-3 phrases worth learning.`, SCHEMA.debrief), rec.skill || null);
+${rec.skill ? "Target skill: " + rec.skill + ". Its score is required." : ""} Score other skills only where the transcript clearly shows them, else null. used_phrase is null. In "fix", include pacing advice if the pace is far outside the natural range. Give 2-4 rewrites quoting the learner exactly, and 1-3 phrases worth learning.`, SCHEMA.debrief, { feature: "video" }), rec.skill || null);
     rec.debrief = { ...d, wpm };
     await db.put("recordings", rec);
     const p = structuredClone(prof());
@@ -542,7 +615,9 @@ function render() {
 }
 function renderMini() {
   const p = prof();
-  $("#mini").replaceChildren(...Object.entries(SKILLS).map(([k, v]) => h("span", null, v.short + " ", h("b", { text: p.skills[k].level }))));
+  const m = S.spend?.months?.[monthKey()];
+  $("#mini").replaceChildren(...Object.entries(SKILLS).map(([k, v]) => h("span", null, v.short + " ", h("b", { text: p.skills[k].level }))),
+    h("a", { href: "#progress", class: "spend", title: "Estimated Claude spend this month" }, "Spent ", h("b", { text: money(m?.total || 0) })));
 }
 function renderStatus() {
   const box = $("#status"); box.replaceChildren();
@@ -675,16 +750,53 @@ function renderCold() {
       h("p", { class: "small" }, h("strong", { text: "Avoid: " }), c.avoid.join("; ") + "."),
       h("div", { class: "row" },
         c.topic ? h("button", { class: "primary", disabled: !!S.busy, onclick: () => startRep(c.topic) }, "Drill this in a conversation") : null,
-        S.busy === "quiz" && !q ? h("span", { class: "thinking", text: "Writing your quiz" }) : h("button", { disabled: !!S.busy, onclick: () => startQuiz(c) }, q ? "New quiz" : "Quiz me")),
+        h("button", { disabled: !!S.busy, onclick: () => startQuiz(c) }, q ? "New quiz" : "Quiz me"),
+        h("span", { class: "small muted num", text: bankLeft(c.key) + " of " + (QUIZ_BANK[c.key] || []).length + " free questions left" })),
       q ? quizView(c, q) : null));
   }
   v.replaceChildren(...out);
 }
 function quizView(card, q) {
+  if (q.mode === "ai") return aiQuizView(card, q);
+  if (q.mode === "empty") return h("div", { class: "quiz" },
+    h("p", { text: "You've answered every built-in question for this card." }),
+    h("div", { class: "row" },
+      S.busy === "quiz" ? h("span", { class: "thinking", text: "Writing your quiz" }) : h("button", { class: "primary", disabled: !!S.busy, onclick: () => aiQuiz(card) }, "Fresh questions from Claude (about 0.2 cents)"),
+      h("button", { onclick: async () => { S.knowCold = { ...S.knowCold, [card.key]: { ...(S.knowCold[card.key] || {}), seen: [] } }; await db.kvSet("knowCold", S.knowCold); startQuiz(card); } }, "Reuse the built-in questions")));
+  const checked = q.phase !== "answer";
+  const blocks = q.items.map((it, n) => {
+    if (it.kind === "mc") {
+      const name = "mc-" + card.key + "-" + n;
+      return h("fieldset", { class: "mcq" }, h("legend", null, h("strong", { text: (n + 1) + ". " }), it.q),
+        it.opts.map((o, k) => {
+          const cls = checked ? (o.right ? "opt right" : k === it.choice ? "opt wrong" : "opt") : "opt";
+          return h("label", { class: cls }, h("input", { type: "radio", name, value: String(k), checked: it.choice === k, disabled: checked, onchange: () => { it.choice = k; } }), " ", o.t);
+        }),
+        checked && it.why ? h("p", { class: "small muted", text: (it.opts[it.choice]?.right ? "Right. " : "Not quite. ") + it.why }) : null);
+    }
+    const ta = h("textarea", { id: "say-" + card.key + "-" + n, class: "short", placeholder: "What you'd say back. Tap Speak to say it out loud.", disabled: checked, oninput: e => { it.answer = e.target.value; } });
+    ta.value = it.answer;
+    return h("div", { class: "stack" }, h("p", null, h("strong", { text: (n + 1) + ". They say: " }), it.s), ta,
+      !checked ? h("div", { class: "row" }, micButton(ta, "Speak", () => { it.answer = ta.value; })) : null,
+      checked ? h("div", { class: "rewrite" }, h("span", { class: "small muted", text: "A strong reply" }), h("span", { class: "better", text: it.model }),
+        it.feedback ? h("span", { class: "small", text: "Claude: " + it.feedback }) : null,
+        it.rating ? h("span", { class: "verdict " + it.rating, text: it.rating === "right" ? "Nailed it" : it.rating === "partly" ? "Partly" : "Missed" })
+          : q.phase === "check" ? h("div", { class: "row" }, h("span", { class: "small", text: "How did yours compare?" }),
+            [["right", "Nailed it"], ["partly", "Partly"], ["wrong", "Missed"]].map(([v, l]) => h("button", { class: "pill", onclick: () => { it.rating = v; finishIfRated(card); } }, l))) : null) : null);
+  });
+  const unrated = q.items.some(it => it.kind === "say" && !it.rating);
+  return h("div", { class: "quiz" },
+    q.phase === "done" ? h("p", { class: "levelup " + (q.score >= 4 ? "up" : ""), text: q.score + " of 5" + (q.score >= 4 ? ". Nice work." : "") }) : null,
+    blocks,
+    q.phase === "answer" ? h("div", { class: "row" }, h("button", { class: "primary", onclick: () => checkBankQuiz(card) }, "Check my answers"), h("span", { class: "small muted", text: "Free. No Claude call." })) : null,
+    q.phase === "check" && unrated ? h("div", { class: "row" }, S.busy === "grade" ? h("span", { class: "thinking", text: "Getting feedback" })
+      : h("button", { disabled: !!S.busy || !ai.ready(), onclick: () => sayFeedback(card) }, "Let Claude grade my replies (about 0.1 cent)")) : null);
+}
+function aiQuizView(card, q) {
   if (q.phase === "answer") {
     const inputs = q.questions.map((x, i) => h("textarea", { id: "qa-" + i, class: "short", placeholder: x.kind === "respond" ? "What you'd say back" : "Your answer" }));
     return h("div", { class: "quiz" }, q.questions.map((x, i) => h("div", { class: "stack" }, h("p", null, h("strong", { text: (i + 1) + ". " }), x.q), inputs[i], h("div", { class: "row" }, micButton(inputs[i])))),
-      h("div", { class: "row" }, S.busy === "grade" ? h("span", { class: "thinking", text: "Grading" }) : h("button", { class: "primary", onclick: () => { stopMic(); gradeQuiz(card, inputs.map(t => t.value.trim())); } }, "Check my answers")));
+      h("div", { class: "row" }, S.busy === "grade" ? h("span", { class: "thinking", text: "Grading" }) : h("button", { class: "primary", onclick: () => { stopMic(); gradeAiQuiz(card, inputs.map(t => t.value.trim())); } }, "Check my answers")));
   }
   const r = q.results;
   return h("div", { class: "quiz" }, h("p", { class: "levelup " + (r.score >= 4 ? "up" : ""), text: r.score + " of 5" }),
@@ -812,6 +924,7 @@ function renderProgress() {
       h("div", { class: "rungs", role: "img", "aria-label": sk.label + ": level " + s.level + " of 6" }, LEVELS.map(l => h("span", { class: "rung" + (l.n <= s.level ? " on" : "") + (l.n === s.level ? " cur" : ""), title: l.name, text: l.n }))),
       h("span", { class: "lmeta", text: lvName(s.level) + (s.up ? " · " + s.up + "/3 toward next" : "") + (s.down ? " · 1 rough rep" : "") + ((s.scores || []).length ? " · last " + s.scores.slice(-3).join(", ") : "") })));
   }
+  out.push(spendCard());
   out.push(h("article", { class: "card" }, h("h2", { class: "display", text: "The ladder" }), h("p", { class: "small muted", text: LEVELS.map(l => l.n + " " + l.name).join(" · ") }), lad));
   out.push(h("div", { class: "card" }, h("h3", { text: "Target-skill score by rep" }), spark(ss.slice(0, 20).reverse().map(s => s.debrief?.scores?.[s.skill]).filter(Boolean))));
   const tk = Object.entries(p.topics);
@@ -828,16 +941,17 @@ function renderPhrases() {
   const v = $("#v-phrases"), out = [];
   const keptQ = $("#lookup-q")?.value || "";
   const qIn = h("input", { type: "text", id: "lookup-q", placeholder: "Type a phrase you heard, like “move the needle”", autocomplete: "off" }); qIn.value = keptQ;
-  const go = () => { const ph = qIn.value.trim(); if (!ph) return; if (!ai.ready()) { setView("settings"); flash("Add your Anthropic API key first."); return; }
-    guard("lookup", async () => { S.lookup = await ai.lookupPhrase(ph); }); };
-  qIn.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); go(); } });
+  const go = (web) => { const ph = (web && S.lookup ? S.lookup.phrase : qIn.value.trim()) || qIn.value.trim(); if (!ph) return; if (!ai.ready()) { setView("settings"); flash("Add your Anthropic API key first."); return; }
+    guard("lookup", async () => { S.lookup = web ? await ai.lookupPhrase(ph) : await ai.explainPhrase(ph); }); };
+  qIn.addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); go(false); } });
   const L = S.lookup;
-  out.push(h("article", { class: "card lead" }, h("span", { class: "eyebrow", text: "Look it up" }),
-    h("p", { class: "muted", text: "Searches the web for how Americans actually use a phrase, with sources." }),
-    h("div", { class: "searchrow" }, qIn, S.busy === "lookup" ? h("span", { class: "thinking", text: "Searching" }) : h("button", { class: "primary", onclick: go, disabled: !!S.busy }, "Look it up")),
+  out.push(h("article", { class: "card lead" }, h("span", { class: "eyebrow", text: "Look up a phrase" }),
+    h("p", { class: "muted", text: "Explain it answers from Claude's own knowledge for a fraction of a cent. Use the web search only for brand-new slang or when you want sources (about 1 cent)." }),
+    h("div", { class: "searchrow" }, qIn, S.busy === "lookup" ? h("span", { class: "thinking", text: "Looking it up" }) : [h("button", { class: "primary", onclick: () => go(false), disabled: !!S.busy }, "Explain it"), h("button", { onclick: () => go(true), disabled: !!S.busy }, "Search the web")]),
     L ? h("div", { class: "lookup" },
       h("div", { class: "spread" }, h("h3", { class: "display-sm", text: L.phrase }), chip(L.register || "", /avoid|slang/i.test(L.register || "") ? "bad" : "accent")),
       h("p", { text: L.meaning }), L.example ? h("p", { class: "example", text: "“" + L.example + "”" }) : null, L.notes ? h("p", { class: "small", text: L.notes }) : null,
+      !L.fromWeb ? h("p", { class: "small muted" }, "From Claude's knowledge, not a web search. ", S.busy ? null : h("button", { class: "pill", onclick: () => go(true) }, "Check it on the web (about 1 cent)")) : null,
       L.sources?.length ? h("p", { class: "small muted" }, "Sources: ", L.sources.map((s, i) => [i ? ", " : "", h("a", { href: s.url, target: "_blank", rel: "noopener" }, s.title.length > 50 ? s.title.slice(0, 50) + "…" : s.title)])) : null,
       h("div", { class: "row" }, S.phrases.some(p => p.id === slug(L.phrase)) ? h("span", { class: "small muted", text: "Already in your phrase bank." })
         : h("button", { onclick: async () => { await addPhrases([{ phrase: L.phrase, meaning: L.meaning, example: L.example || "" }], null, "lookup"); flash("Added to your phrase bank."); renderPhrases(); } }, "Save to phrase bank"))) : null));
@@ -874,7 +988,7 @@ function renderSettings() {
         h("button", { class: "primary", onclick: async () => { st.apiKey = key.value.trim(); st.model = model.value; await saveSettings(); flash(st.apiKey ? "Key saved in this browser." : "Key removed."); render(); } }, "Save"),
         h("button", { onclick: () => { key.type = key.type === "password" ? "text" : "password"; } }, "Show or hide"),
         S.busy === "test" ? h("span", { class: "thinking", text: "Testing" }) : h("button", { disabled: !!S.busy, onclick: async () => { st.apiKey = key.value.trim(); st.model = model.value; await saveSettings();
-          guard("test", async () => { const r = await ai.askJSON("Reply with ok set to true.", obj({ ok: { type: "boolean" } }), { effort: "low" }); S.flash = r.ok ? "Your key works." : "Unexpected reply."; }); } }, "Test key"))),
+          guard("test", async () => { const r = await ai.askJSON("Reply with ok set to true.", obj({ ok: { type: "boolean" } }), { effort: "low", feature: "other" }); S.flash = r.ok ? "Your key works." : "Unexpected reply."; }); } }, "Test key"))),
     h("article", { class: "card" }, h("h3", { text: "About you" }), about,
       h("div", { class: "row" }, h("button", { class: "primary", onclick: async () => { st.about = about.value.trim(); await saveSettings(); flash("Saved."); } }, "Save"))),
     h("article", { class: "card" }, h("h3", { text: "Voice" }),
@@ -883,6 +997,7 @@ function renderSettings() {
           h("button", { class: "primary", onclick: async () => { st.voice = voiceSel.value; st.rate = Number(rate.value); await saveSettings(); flash("Saved."); } }, "Save"))]
         : h("p", { class: "small muted", text: "This browser can't read text aloud." }),
       h("p", { class: "small muted", text: media.canListen ? "Speech recognition is available here. In Chrome it's processed by Google's speech service." : "Speech recognition isn't available in this browser. Chrome or Edge adds it." })),
+    spendCard(),
     h("article", { class: "card" }, h("h3", { text: "Backup" }),
       h("p", { class: "small muted", text: "Your data lives only in this browser. Export a backup now and then, and import it on another device. Videos aren't in the backup; download those from Film. The API key is never exported." }),
       h("div", { class: "row" }, h("button", { onclick: async () => {

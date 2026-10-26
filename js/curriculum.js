@@ -1,3 +1,4 @@
+import { MORE_TOPICS, MORE_CARDS } from "./know-cold-more.js";
 // Static curriculum: skills, partner levels, topics and the Know Cold library.
 export const SKILLS = {
   follow_up: { label: "Follow-up questions", short: "Follow-ups", desc: "Ask a second and third question that builds on what they just said, instead of jumping to a new topic." },
@@ -55,7 +56,8 @@ export const TOPICS = {
   tech_ai:          { label: "Tech and AI news", months: [] },
   fitness:          { label: "Fitness", months: [] },
   markets_work:     { label: "Markets and work", months: [] },
-  hometown:         { label: "Where you're from", months: [] }
+  hometown:         { label: "Where you're from", months: [] },
+  ...MORE_TOPICS
 };
 
 // The Know Cold library. Evergreen on purpose: no scores, standings or news that go stale.
@@ -281,3 +283,4 @@ export const KNOW_COLD = [
     bridge: "A smooth exit from a bad topic is a skill in itself. Acknowledge briefly, then pivot to something they mentioned earlier.",
     avoid: ["Arguing, even when you're right"] }
 ];
+KNOW_COLD.push(...MORE_CARDS);

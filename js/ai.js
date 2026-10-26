@@ -8,6 +8,20 @@ const FALLBACK = { betas: ["server-side-fallback-2026-07-01"], fallbacks: "defau
 let client = null;
 let model = DEFAULT_MODEL;
 
+// Spend meter: estimate each call's cost from the token counts the API returns.
+// Prices are USD per million tokens; web search is $10 per 1,000 searches.
+const PRICES = { "claude-opus-5-5": [4, 20], "claude-sonnet-5-5": [2, 10], "claude-haiku-5-5": [0.10, 0.50] };
+let usageListener = null;
+export const onUsage = fn => { usageListener = fn; };
+function record(msg, feature) {
+  const u = msg?.usage; if (!u || !usageListener) return;
+  const [pin, pout] = PRICES[Object.keys(PRICES).find(k => String(msg.model || "").startsWith(k))] || PRICES[model] || [5, 25];
+  const inTok = (u.input_tokens || 0) + 1.25 * (u.cache_creation_input_tokens || 0) + 0.1 * (u.cache_read_input_tokens || 0);
+  const searches = u.server_tool_use?.web_search_requests || 0;
+  const cost = (inTok * pin + (u.output_tokens || 0) * pout) / 1e6 + searches * 0.01;
+  usageListener({ feature, cost, input: u.input_tokens || 0, output: u.output_tokens || 0, searches });
+}
+
 export function configure({ apiKey, modelId }) {
   client = apiKey ? new Anthropic({ apiKey, dangerouslyAllowBrowser: true, maxRetries: 1 }) : null;
   model = modelId || DEFAULT_MODEL;
@@ -33,25 +47,37 @@ function textOf(msg) {
 function need() { if (!client) throw new Error("Add your Anthropic API key in Settings first."); }
 
 // One request whose answer must match a JSON schema (structured outputs).
-export async function askJSON(prompt, schema, { effort = "medium", signal } = {}) {
+export async function askJSON(prompt, schema, { effort = "medium", signal, feature = "other" } = {}) {
   need();
   const msg = await client.beta.messages.create({
     model, max_tokens: 16000, ...FALLBACK,
     output_config: { effort, format: { type: "json_schema", schema } },
     messages: [{ role: "user", content: prompt }]
   }, { signal });
+  record(msg, feature);
   return JSON.parse(textOf(msg));
 }
 
 // Streamed roleplay turn. onText receives the whole reply so far.
-export async function streamChat(system, messages, onText, { effort = "low", signal } = {}) {
+export async function streamChat(system, messages, onText, { effort = "low", signal, feature = "rep" } = {}) {
   need();
   const stream = client.beta.messages.stream({
     model, max_tokens: 4000, ...FALLBACK, output_config: { effort }, system, messages
   }, { signal });
   stream.on("text", (_delta, snapshot) => onText(snapshot));
   const msg = await stream.finalMessage();
+  record(msg, feature);
   return textOf(msg);
+}
+
+// Phrase explanation from Claude's own knowledge: no web search, so it costs a fraction of a cent.
+export async function explainPhrase(phrase, { signal } = {}) {
+  const S = { type: "string" };
+  const out = await askJSON(`Explain the English phrase or idiom "${phrase}" the way an American professional would use it, from your own knowledge.
+meaning: plain-English meaning in 1-2 sentences. register: one of casual, neutral, office-safe, formal, slang, avoid at work. example: one natural example sentence from a workplace or social setting. notes: one short usage note (who says it, tone, common mistakes, or close alternatives). If it's very new slang you're unsure about, say so in notes.`,
+    { type: "object", properties: { phrase: S, meaning: S, register: S, example: S, notes: S }, required: ["phrase", "meaning", "register", "example", "notes"], additionalProperties: false },
+    { effort: "low", signal, feature: "lookup" });
+  return { ...out, sources: [], fromWeb: false };
 }
 
 // Phrase lookup with Claude's web search tool. Returns the parsed answer plus real source links.
@@ -67,6 +93,7 @@ Run one web search, then reply with only a JSON object, no other text:
       model, max_tokens: 8000, ...FALLBACK, output_config: { effort: "low" },
       tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 1 }], messages
     }, { signal });
+    record(msg, "lookup");
     if (msg.stop_reason !== "pause_turn") break;
     messages.push({ role: "assistant", content: msg.content });
   }
@@ -82,5 +109,5 @@ Run one web search, then reply with only a JSON object, no other text:
   for (const b of msg.content) {
     if (b.type === "web_search_tool_result" && Array.isArray(b.content)) for (const r of b.content) add(r.url, r.title);
   }
-  return { ...out, sources };
+  return { ...out, sources, fromWeb: true };
 }
