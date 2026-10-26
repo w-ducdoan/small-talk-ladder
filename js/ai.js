@@ -58,14 +58,14 @@ export async function streamChat(system, messages, onText, { effort = "low", sig
 export async function lookupPhrase(phrase, { signal } = {}) {
   need();
   const prompt = `Look up the English phrase or idiom "${phrase}" on the web, the way an American professional would use it.
-Search, then reply with only a JSON object, no other text:
+Run one web search, then reply with only a JSON object, no other text:
 {"phrase":"the phrase in its usual form","meaning":"plain-English meaning in 1-2 sentences","register":"casual | neutral | office-safe | formal | slang | avoid at work","example":"one natural example sentence from a workplace or social setting","notes":"one short usage note: who says it, tone, common mistakes, or close alternatives"}`;
   const messages = [{ role: "user", content: prompt }];
   let msg;
   for (let i = 0; i < 3; i++) {
     msg = await client.beta.messages.create({
       model, max_tokens: 8000, ...FALLBACK, output_config: { effort: "low" },
-      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 3 }], messages
+      tools: [{ type: "web_search_20260209", name: "web_search", max_uses: 1 }], messages
     }, { signal });
     if (msg.stop_reason !== "pause_turn") break;
     messages.push({ role: "assistant", content: msg.content });
