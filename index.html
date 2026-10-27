@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Small Talk Ladder</title>
-<meta name="description" content="Daily American small-talk practice: an adaptive roleplay partner, scored debriefs, video drills, a phrase bank and the topics to know cold.">
+<meta name="description" content="Daily speaking practice: American small talk with an adaptive roleplay partner, timed public-speaking challenges, video review, a phrase bank and the topics to know cold.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%237B2230'/%3E%3Cpath d='M9 24h14M11 19h10M13 14h6M15 9h2' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -16,13 +16,14 @@
   <div class="wrap">
     <div class="brand">
       <div>
-        <p class="kicker">Daily conversation practice</p>
+        <p class="kicker">Daily speaking practice</p>
         <h1>Small Talk <em>Ladder</em></h1>
       </div>
       <div class="mini" id="mini" aria-label="Current level per skill"></div>
     </div>
     <nav class="tabs" aria-label="Sections">
       <a href="#today" data-v="today">Today</a>
+      <a href="#speak" data-v="speak">Speak</a>
       <a href="#cold" data-v="cold">Know Cold</a>
       <a href="#film" data-v="film">Film</a>
       <a href="#plan" data-v="plan">Plan</a>
@@ -35,6 +36,7 @@
 <main class="wrap">
   <div id="status"></div>
   <section class="view" id="v-today"><p class="thinking">Loading</p></section>
+  <section class="view" id="v-speak" hidden></section>
   <section class="view" id="v-cold" hidden></section>
   <section class="view" id="v-film" hidden></section>
   <section class="view" id="v-plan" hidden></section>

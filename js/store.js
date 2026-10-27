@@ -1,13 +1,13 @@
 // Everything lives in this browser's IndexedDB. Nothing is sent to a server
 // except the prompts that go to the Anthropic API with the viewer's own key.
 const DB_NAME = "small-talk-ladder";
-const STORES = ["kv", "plans", "sessions", "phrases", "recordings", "videos"];
+const STORES = ["kv", "plans", "sessions", "phrases", "recordings", "videos", "speeches"];
 let dbp = null;
 
 function open() {
   if (dbp) return dbp;
   dbp = new Promise((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, 1);
+    const req = indexedDB.open(DB_NAME, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       for (const s of STORES) if (!db.objectStoreNames.contains(s)) db.createObjectStore(s, { keyPath: "id" });

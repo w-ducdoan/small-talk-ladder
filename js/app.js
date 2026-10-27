@@ -5,6 +5,7 @@ import { SKILLS, LEVELS, DEPTH, SETTINGS, KIND, TOPICS, KNOW_COLD } from "./curr
 import { BANK_A } from "./quiz-bank-a.js";
 import { BANK_B } from "./quiz-bank-b.js";
 const QUIZ_BANK = { ...BANK_A, ...BANK_B };
+import { FRAMEWORKS, TYPE_FRAMEWORK, TYPE_LABEL, SPEAK_LEVELS, SPEAK_SKILLS, SPEAK_TOPICS, CURVEBALLS, EMOTIONS, TWISTERS, FILLERS } from "./speak-data.js";
 
 /* ---------- Helpers ---------- */
 const $ = s => document.querySelector(s);
@@ -41,10 +42,10 @@ const obj = (props) => ({ type: "object", properties: props, required: Object.ke
 /* ---------- State ---------- */
 const S = {
   settings: { apiKey: "", model: ai.DEFAULT_MODEL, voice: "", rate: 1, voiceMode: false, about: "" },
-  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {}, spend: { months: {} },
+  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {}, spend: { months: {} }, speeches: [], speak: null,
   live: null, busy: "", flash: "", view: "today", quiz: null, drill: null, lookup: null, ctl: null
 };
-const VIEWS = ["today", "cold", "film", "plan", "progress", "phrases", "settings"];
+const VIEWS = ["today", "speak", "cold", "film", "plan", "progress", "phrases", "settings"];
 
 function defaultProfile() {
   const skills = {};
@@ -62,13 +63,14 @@ const learner = () => S.settings.about.trim() || "No background given. Assume an
 const lvName = n => LEVELS[clamp(n, 1, 6) - 1].name;
 
 async function loadAll() {
-  const [kv, plans, sessions, phrases, recordings] = await Promise.all([db.all("kv"), db.all("plans"), db.all("sessions"), db.all("phrases"), db.all("recordings")]);
+  const [kv, plans, sessions, phrases, recordings, speeches] = await Promise.all([db.all("kv"), db.all("plans"), db.all("sessions"), db.all("phrases"), db.all("recordings"), db.all("speeches")]);
   const kvm = Object.fromEntries(kv.map(r => [r.id, r.value]));
   S.settings = { ...S.settings, ...(kvm.settings || {}), apiKey: kvm.apiKey || "" };
   S.profile = kvm.profile || null;
   S.knowCold = kvm.knowCold || {};
   S.spend = kvm.spend || { months: {} };
   const byNew = (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt);
+  S.speeches = speeches.sort(byNew); restoreSpeak();
   S.plans = plans.sort(byNew); S.sessions = sessions.sort(byNew); S.phrases = phrases; S.recordings = recordings.sort(byNew);
   ai.configure({ apiKey: S.settings.apiKey, modelId: S.settings.model });
   if (!S.plans.length) await seedPlan();
@@ -87,7 +89,7 @@ async function seedPlan() {
     id: db.uid("plan"), createdAt: new Date().toISOString(), source: "Starter plan", request: null,
     headline: "Calibration week: follow-ups and turning it back",
     focus_skills: ["follow_up", "turn_back"], topics: [...seasonal, "weekend_plans"].slice(0, 4), setting: "one_on_one",
-    partner_level_override: null, override_until: null, sessions_per_week: 4,
+    partner_level_override: null, override_until: null, sessions_per_week: 4, speak_per_week: 2,
     notes: [
       "Everyone starts at Level 2. A 5/5 in your first three reps moves you up right away, so the ladder finds your level fast.",
       "The goal isn't knowing the topic. It's one good question, then a second one that builds on their answer.",
@@ -99,8 +101,18 @@ async function seedPlan() {
   await db.put("plans", plan); S.plans = [plan];
 }
 
+function fillerMarkup(text) {
+  const out = [], toks = String(text).split(/(\s+)/);
+  for (let i = 0; i < toks.length; i++) {
+    const w = toks[i].toLowerCase().replace(/[^a-z']/g, ""), next = (toks[i + 2] || "").toLowerCase().replace(/[^a-z']/g, "");
+    if (w && next && FILLERS.includes(w + " " + next)) { out.push(h("mark", { class: "filler", text: toks[i] + toks[i + 1] + toks[i + 2] })); i += 2; continue; }
+    if (w && FILLERS.includes(w)) out.push(h("mark", { class: "filler", text: toks[i] })); else out.push(toks[i]);
+  }
+  return out;
+}
+
 /* ---------- Spend meter ---------- */
-const FEATURE_LABEL = { rep: "Conversation reps", plan: "Plan updates", quiz: "Quiz feedback", video: "Video drills", lookup: "Phrase lookups", other: "Other" };
+const FEATURE_LABEL = { rep: "Conversation reps", speak: "Speaking challenges", plan: "Plan updates", quiz: "Quiz feedback", video: "Video drills", lookup: "Phrase lookups", other: "Other" };
 const monthKey = (d = new Date()) => d.getFullYear() + "-" + z(d.getMonth() + 1);
 ai.onUsage(({ feature, cost, searches }) => {
   const m = S.spend.months[monthKey()] ||= { total: 0, calls: 0, searches: 0, byFeature: {} };
@@ -197,7 +209,7 @@ const SCHEMA = {
     phrases: { type: "array", items: obj({ phrase: { type: "string" }, meaning: { type: "string" }, example: { type: "string" } }) },
     used_phrase: orNull("boolean"), topic_comfort: { type: "integer" }, next_time: { type: "string" } }),
   plan: obj({ headline: { type: "string" }, focus_skills: strList, topics: strList, setting: { type: "string", enum: ["one_on_one", "group", "event", "mixed"] },
-    partner_level_override: nullableInt, override_until: orNull("string"), sessions_per_week: { type: "integer" }, notes: strList,
+    partner_level_override: nullableInt, override_until: orNull("string"), sessions_per_week: { type: "integer" }, speak_per_week: { type: "integer" }, notes: strList,
     changes: { type: "array", items: obj({ change: { type: "string" }, why: { type: "string" } }) }, week_summary: { type: "string" } }),
   drill: obj({ title: { type: "string" }, setup: { type: "string" }, opener: { type: "string" }, aim: { type: "string" }, include: strList, seconds: { type: "integer" } }),
   quiz: obj({ questions: { type: "array", items: obj({ q: { type: "string" }, kind: { type: "string", enum: ["fact", "respond"] }, ideal: { type: "string" } }) } }),
@@ -423,15 +435,16 @@ Recent reps, newest first:
 ${sess}
 Recent scored videos:
 ${vids}
+Speaking challenges (timed research, then a structured 1-2 minute talk): ladder level ${speakProf().level} of 6 (${SPEAK_LEVELS.map(l => l.n + " " + l.name).join(", ")}); recent scores ${speakProf().scores.slice(-5).join(",") || "none"}; talks in the last 7 days ${S.speeches.filter(x => daysSince(x.createdAt) < 7).length}.
 Request: ${ask}
-Rules: focus_skills holds 1-3 keys from [${Object.keys(SKILLS).join(", ")}], usually the weakest unless the learner asked otherwise. topics holds 2-5 keys from [${Object.keys(TOPICS).join(", ")}]. partner_level_override is null, or 1-6 only when the learner asked to jump to or hold a level; override_until is YYYY-MM-DD or null. sessions_per_week is 3-7, lighter when the learner says a week is heavy. Keep anything the learner did not ask to change. Every change needs a reason a person would accept, citing evidence from the reps or the calendar. notes holds 2-4 short coaching notes.`, SCHEMA.plan, { feature: "plan" });
+Rules: focus_skills holds 1-3 keys from [${Object.keys(SKILLS).join(", ")}], usually the weakest unless the learner asked otherwise. topics holds 2-5 keys from [${Object.keys(TOPICS).join(", ")}]. partner_level_override is null, or 1-6 only when the learner asked to jump to or hold a level; override_until is YYYY-MM-DD or null. sessions_per_week is 3-7, lighter when the learner says a week is heavy. speak_per_week is 1-5 speaking challenges. Keep anything the learner did not ask to change. Every change needs a reason a person would accept, citing evidence from the reps or the calendar. notes holds 2-4 short coaching notes.`, SCHEMA.plan, { feature: "plan" });
     const doc = {
       id: db.uid("plan"), createdAt: new Date().toISOString(), source: mode === "weekly" ? "Weekly review" : "Your request", request: request || null,
       headline: String(r.headline || "This week's plan").slice(0, 160), focus_skills: strArr(r.focus_skills, 3).filter(k => SKILLS[k]),
       topics: strArr(r.topics, 5).filter(k => TOPICS[k]), setting: r.setting || "mixed",
       partner_level_override: r.partner_level_override ? clamp(r.partner_level_override, 1, 6) : null,
       override_until: /^\d{4}-\d{2}-\d{2}$/.test(r.override_until || "") ? r.override_until : null,
-      sessions_per_week: clamp(r.sessions_per_week || 5, 3, 7), notes: strArr(r.notes, 4),
+      sessions_per_week: clamp(r.sessions_per_week || 5, 3, 7), speak_per_week: clamp(r.speak_per_week || 2, 1, 5), notes: strArr(r.notes, 4),
       changes: (r.changes || []).filter(c => c?.change).slice(0, 6), week_summary: String(r.week_summary || "")
     };
     if (!doc.focus_skills.length) doc.focus_skills = plan?.focus_skills || ["follow_up"];
@@ -611,12 +624,13 @@ function setView(v) {
 }
 function render() {
   renderMini(); renderStatus();
-  ({ today: renderToday, cold: renderCold, film: renderFilm, plan: renderPlan, progress: renderProgress, phrases: renderPhrases, settings: renderSettings })[S.view]();
+  ({ today: renderToday, speak: renderSpeak, cold: renderCold, film: renderFilm, plan: renderPlan, progress: renderProgress, phrases: renderPhrases, settings: renderSettings })[S.view]();
 }
 function renderMini() {
   const p = prof();
   const m = S.spend?.months?.[monthKey()];
   $("#mini").replaceChildren(...Object.entries(SKILLS).map(([k, v]) => h("span", null, v.short + " ", h("b", { text: p.skills[k].level }))),
+    h("span", null, "Speak ", h("b", { text: speakProf().level })),
     h("a", { href: "#progress", class: "spend", title: "Estimated Claude spend this month" }, "Spent ", h("b", { text: money(m?.total || 0) })));
 }
 function renderStatus() {
@@ -660,6 +674,10 @@ function renderToday() {
       S.busy === "scenario" ? h("span", { class: "thinking", text: "Setting the scene" }) : h("button", { class: "primary", onclick: () => startRep(), disabled: !!S.busy }, "Start today's rep"),
       h("label", { class: "toggle" }, h("input", { type: "checkbox", id: "voice-mode", checked: S.settings.voiceMode, onchange: async e => { S.settings.voiceMode = e.target.checked; await saveSettings(); } }), " Voice mode")),
     h("p", { class: "small muted", text: media.canListen ? "Voice mode reads the partner's lines aloud. Tap Speak to answer out loud; the text appears as you talk." : "Your browser can't do speech recognition, so you'll type replies. Chrome or Edge adds Speak buttons." })));
+  const talks = S.speeches.filter(x => daysSince(x.createdAt) < 7).length;
+  out.push(h("div", { class: "card" }, h("div", { class: "spread" }, h("span", { class: "eyebrow", text: "Speaking challenge" }), h("span", { class: "small muted num", text: talks + " of " + (plan?.speak_per_week || 2) + " talks this week" })),
+    h("p", { text: "Random topic, timed research with search only, then a structured talk. You're on level " + speakProf().level + ": " + SPEAK_LEVELS[speakProf().level - 1].name + "." }),
+    h("div", { class: "row" }, h("button", { onclick: () => setView("speak") }, S.speak && S.speak.phase !== "done" ? "Resume your challenge" : "Go to Speak"))));
   if (plan) out.push(h("div", { class: "card" }, h("span", { class: "eyebrow", text: "This week" }), h("h3", { text: plan.headline }),
     plan.notes?.length ? h("ul", { class: "clean small" }, plan.notes.map(t => h("li", { text: t }))) : null));
   const last = S.sessions[0];
@@ -851,18 +869,30 @@ function renderFilm() {
 }
 function recordingCard(r) {
   const vid = h("video", { class: "playback", controls: true, playsinline: true, preload: "metadata" });
+  const cover = h("div", { class: "cover", hidden: true }, "Pass 1: audio only. Listen to your voice: pace, volume, melody, pauses.");
+  const wrap = h("div", { class: "reviewwrap" }, vid, cover);
+  const txview = h("div", { class: "txview", hidden: true }, fillerMarkup(r.transcript || ""));
+  r.passes ||= {};
+  const passBtn = (key, label, fn) => h("button", { class: "pill" + (r.passes[key] ? " done" : ""), onclick: async e => { fn(); r.passes[key] = true; e.currentTarget.classList.add("done"); await db.put("recordings", r); } }, label);
+  const passRow = h("div", { class: "row" }, h("span", { class: "small", text: "Review in three passes:" }),
+    passBtn("audio", "1. Audio only", () => { cover.hidden = false; vid.muted = false; txview.hidden = true; }),
+    passBtn("video", "2. Muted video", () => { cover.hidden = true; vid.muted = true; txview.hidden = true; }),
+    passBtn("text", "3. Transcript, fillers in red", () => { cover.hidden = true; vid.pause(); txview.replaceChildren(...fillerMarkup(r.transcript || "")); txview.hidden = false; }),
+    h("button", { class: "pill", onclick: () => { cover.hidden = true; vid.muted = false; txview.hidden = true; } }, "Normal"));
+  const fresh = daysSince(r.createdAt) < 0.8 ? h("p", { class: "small muted", text: "Vinh Giang's tip: wait until tomorrow to review it, so you're less harsh on yourself." }) : null;
   const dl = h("a", { class: "btn ghost", download: "small-talk-" + r.createdAt.slice(0, 10) + "-" + slug(r.title).slice(0, 30) + (r.mime === "video/mp4" ? ".mp4" : ".webm") }, "Download video");
   const notes = h("textarea", { id: "notes-" + r.id, class: "short", placeholder: "Your own notes from watching it back: eye contact, pace, energy" }); notes.value = r.notes || "";
   const tx = h("textarea", { id: "tx-" + r.id, class: "short" }); tx.value = r.transcript || "";
   const card = h("details", { class: "card fold", ontoggle: async e => { if (e.target.open && !vid.src) { const u = await videoURL(r.id); if (u) { vid.src = u; dl.href = u; } else vid.replaceWith(h("p", { class: "notice", text: "The video file is missing from this browser." })); } } },
     h("summary", null, h("span", { class: "fold-title", text: r.title }), h("span", { class: "small muted num", text: fmtDate(r.createdAt) + " · " + fmtSecs(r.seconds || 0) }),
-      r.debrief ? chip("Scored", "good") : chip(r.kind === "rep" ? "Rep video" : "Not scored")),
-    vid, r.opener ? h("blockquote", { text: "“" + r.opener + "”" }) : null,
+      r.kind === "speech" ? chip("Talk", "accent") : r.debrief ? chip("Scored", "good") : chip(r.kind === "rep" ? "Rep video" : "Not scored")),
+    wrap, passRow, txview, fresh, r.opener ? h("blockquote", { text: "“" + r.opener + "”" }) : null,
     h("label", { class: "eyebrow", for: tx.id, text: "Transcript" }), tx,
     h("label", { class: "eyebrow", for: notes.id, text: "Notes" }), notes,
     h("div", { class: "row" },
       h("button", { onclick: async () => { r.transcript = tx.value.trim(); r.notes = notes.value.trim(); await db.put("recordings", r); flash("Saved."); } }, "Save edits"),
-      S.busy === "video-" + r.id ? h("span", { class: "thinking", text: "Scoring" }) : h("button", { class: "primary", disabled: !!S.busy, onclick: async () => { r.transcript = tx.value.trim(); r.notes = notes.value.trim(); await scoreRecording(r); } }, r.debrief ? "Score again" : "Score this recording"),
+      r.kind === "speech" ? h("button", { onclick: () => setView("speak") }, "See the score in Speak")
+        : S.busy === "video-" + r.id ? h("span", { class: "thinking", text: "Scoring" }) : h("button", { class: "primary", disabled: !!S.busy, onclick: async () => { r.transcript = tx.value.trim(); r.notes = notes.value.trim(); await scoreRecording(r); } }, r.debrief ? "Score again" : "Score this recording"),
       dl,
       h("button", { class: "ghost danger", onclick: e => { if (!r._confirm) { r._confirm = true; e.currentTarget.textContent = "Tap again to delete"; return; } deleteRecording(r); } }, "Delete")),
     r.debrief ? h("div", { class: "stack" }, h("p", { class: "display-sm", text: r.debrief.headline }), r.debrief.wpm ? h("p", { class: "small muted num", text: "Pace: " + r.debrief.wpm + " words per minute (natural is about 130-170)" }) : null, debriefBlock(r.debrief)) : null);
@@ -873,7 +903,7 @@ function renderPlan() {
   const v = $("#v-plan"), plan = currentPlan(), out = [];
   const ov = plan.partner_level_override;
   out.push(h("article", { class: "card lead" },
-    h("div", { class: "spread" }, h("span", { class: "eyebrow", text: "Current plan · " + plan.source + " · " + fmtDate(plan.createdAt) }), h("span", { class: "small muted num", text: plan.sessions_per_week + " reps a week" })),
+    h("div", { class: "spread" }, h("span", { class: "eyebrow", text: "Current plan · " + plan.source + " · " + fmtDate(plan.createdAt) }), h("span", { class: "small muted num", text: plan.sessions_per_week + " reps and " + (plan.speak_per_week || 2) + " talks a week" })),
     h("h2", { class: "display", text: plan.headline }), plan.week_summary ? h("p", { text: plan.week_summary }) : null,
     h("div", { class: "row" }, (plan.focus_skills || []).map(k => chip(SKILLS[k]?.label || k, "accent"))),
     h("div", { class: "row" }, (plan.topics || []).map(k => chip(TOPICS[k]?.label || k)), chip(plan.setting === "mixed" ? "Mixed settings" : SETTINGS[plan.setting]?.label || plan.setting)),
@@ -926,6 +956,14 @@ function renderProgress() {
   }
   out.push(spendCard());
   out.push(h("article", { class: "card" }, h("h2", { class: "display", text: "The ladder" }), h("p", { class: "small muted", text: LEVELS.map(l => l.n + " " + l.name).join(" · ") }), lad));
+  const spk = speakProf();
+  out.push(h("article", { class: "card" }, h("h2", { class: "display", text: "Speaking ladder" }),
+    h("p", { class: "small muted", text: SPEAK_LEVELS.map(l => l.n + " " + l.name).join(" \u00b7 ") }),
+    h("div", { class: "lrow" }, h("span", { class: "lname", text: "Speaking level" }),
+      h("div", { class: "rungs", role: "img", "aria-label": "Speaking level " + spk.level + " of 6" }, SPEAK_LEVELS.map(l => h("span", { class: "rung" + (l.n <= spk.level ? " on" : "") + (l.n === spk.level ? " cur" : ""), title: l.name, text: l.n }))),
+      h("span", { class: "lmeta", text: S.speeches.length + " talks" + (spk.up ? " \u00b7 " + spk.up + "/3 toward next" : "") })),
+    h("ul", { class: "clean small num" }, Object.entries(SPEAK_SKILLS).map(([k, l]) => { const a = avg((spk.skills[k] || []).slice(-5)); return h("li", { text: l + ": " + (a == null ? "no scores yet" : a.toFixed(1) + "/5 over the last " + Math.min(5, spk.skills[k].length)) }); })),
+    S.speeches.length >= 2 ? lineChart(S.speeches.slice(0, 20).reverse().map(x => x.metrics?.fillersPerMin ?? null), { min: 0, max: 15, label: "Filler words per minute, oldest to newest" }) : null));
   out.push(h("div", { class: "card" }, h("h3", { text: "Target-skill score by rep" }), spark(ss.slice(0, 20).reverse().map(s => s.debrief?.scores?.[s.skill]).filter(Boolean))));
   const tk = Object.entries(p.topics);
   out.push(h("div", { class: "card" }, h("h3", { text: "Topics you can hold" }), tk.length ? h("div", { class: "row" }, tk.sort((a, b) => b[1].sessions - a[1].sessions).map(([k, t]) => {
@@ -1009,6 +1047,343 @@ function renderSettings() {
         if (!e.currentTarget.dataset.armed) { e.currentTarget.dataset.armed = "1"; e.currentTarget.textContent = "Tap again to delete everything"; return; }
         await new Promise(r => { const req = indexedDB.deleteDatabase("small-talk-ladder"); req.onsuccess = req.onerror = req.onblocked = r; }); location.reload();
       } }, "Delete all my data")));
+}
+
+/* ---------- Speak: timed research, then a structured talk ---------- */
+const defaultSpeak = () => ({ level: 1, up: 0, down: 0, scores: [], skills: Object.fromEntries(Object.keys(SPEAK_SKILLS).map(k => [k, []])) });
+const speakProf = () => ({ ...defaultSpeak(), ...(prof().speak || {}) });
+const SP = { cam: null, meter: null, listener: null, timer: null, t0: 0, live: { db: -100, hz: null } };
+const mmss = s => Math.floor(Math.max(0, s) / 60) + ":" + z(Math.floor(Math.max(0, s) % 60));
+function lsSpeak(v) { try { if (v) localStorage.setItem("stl-speak", JSON.stringify(v)); else localStorage.removeItem("stl-speak"); } catch { /* storage blocked */ } }
+function restoreSpeak() {
+  try { const v = JSON.parse(localStorage.getItem("stl-speak") || "null"); if (v && (v.phase === "research" || v.phase === "draw" || v.phase === "ready")) S.speak = v; } catch { /* ignore */ }
+}
+function keepSpeak() { const v = S.speak; lsSpeak(v && ["draw", "research", "ready"].includes(v.phase) ? { ...v } : null); }
+
+function drawTopic(redraw) {
+  const sp = speakProf(), lv = SPEAK_LEVELS[clamp(sp.level, 1, 6) - 1];
+  const recent = new Set(S.speeches.slice(0, 30).map(x => x.topicId));
+  let pool = SPEAK_TOPICS.filter(t => lv.types.includes(t.k) && t.d <= lv.hard && !recent.has(t.id) && t.id !== S.speak?.topic?.id);
+  if (lv.n >= 5) { const harder = pool.filter(t => t.d >= 2); if (harder.length > 5) pool = harder; }
+  if (!pool.length) pool = SPEAK_TOPICS.filter(t => lv.types.includes(t.k));
+  const topic = pool[Math.floor(Math.random() * pool.length)];
+  S.speak = { phase: "draw", level: lv.n, topic, fw: TYPE_FRAMEWORK[topic.k], showFw: lv.showFramework, redraws: redraw ? (S.speak?.redraws || 0) + 1 : 0,
+    prepSec: lv.prep, target: lv.target, max: lv.max, curveball: lv.curveball, pledge: lv.prep < 60, notes: {}, chosenFw: lv.showFramework ? TYPE_FRAMEWORK[topic.k] : "", mode: "video" };
+  keepSpeak(); renderSpeak();
+}
+function startResearch() {
+  const sp = S.speak;
+  if (sp.prepSec >= 60 && !sp.pledge) { flash("Tick the research pledge first."); return; }
+  sp.phase = "research"; sp.researchEnd = Date.now() + sp.prepSec * 1000; keepSpeak(); renderSpeak();
+}
+function tickResearch() {
+  const sp = S.speak; if (!sp || sp.phase !== "research") return;
+  const left = (sp.researchEnd - Date.now()) / 1000;
+  const el = $("#speak-clock"); if (el) el.textContent = mmss(left);
+  if (left <= 0) { sp.phase = "ready"; keepSpeak(); flash("Time's up. Put the research away and speak."); renderSpeak(); }
+}
+setInterval(tickResearch, 500);
+
+function cueIndex(fwKey, elapsed, target) {
+  const fw = FRAMEWORKS[fwKey]; if (!fw) return -1;
+  let acc = 0; const f = Math.min(elapsed / target, 0.999);
+  for (let i = 0; i < fw.split.length; i++) { acc += fw.split[i]; if (f < acc) return i; }
+  return fw.split.length - 1;
+}
+async function startSpeaking() {
+  const sp = S.speak;
+  if (!media.canRecord) { flash("This browser can't record. Try Chrome or Edge."); return; }
+  try {
+    SP.cam = new media.Camera();
+    await SP.cam.open(null, { video: sp.mode === "video" });
+  } catch (e) { SP.cam = null; flash(e?.name === "NotAllowedError" ? "Microphone or camera access was blocked. Allow it in the browser's site settings." : "Couldn't open the microphone or camera."); return; }
+  sp.phase = "speaking"; sp.transcript = ""; sp.segments = [];
+  SP.meter = new media.VoiceMeter(SP.cam.stream, s => { SP.live = s; });
+  SP.cam.start(); SP.t0 = Date.now();
+  SP.listener = new media.Listener((fin, interim, segs) => { sp.transcript = fin; sp.segments = segs; const el = $("#speak-tx"); if (el) el.textContent = (fin + (interim ? " " + interim : "")).trim() || "Listening…"; });
+  SP.listener.start();
+  SP.timer = setInterval(() => {
+    const el = (Date.now() - SP.t0) / 1000;
+    const c = $("#speak-time"); if (c) c.textContent = mmss(el) + " / " + mmss(sp.target);
+    const idx = cueIndex(sp.chosenFw || "prep", el, sp.target);
+    document.querySelectorAll("#speak-cues li").forEach((li, i) => li.classList.toggle("now", i === idx));
+    const bar = $("#speak-level"); if (bar) bar.style.width = Math.max(0, Math.min(100, (SP.live.db + 60) * 2)) + "%";
+    const hz = $("#speak-hz"); if (hz) hz.textContent = SP.live.hz ? SP.live.hz + " Hz" : "";
+    if (el >= sp.max) stopSpeaking();
+  }, 200);
+  renderSpeak();
+  const pv = $("#speak-cam"); if (pv && sp.mode === "video") { pv.srcObject = SP.cam.stream; pv.play().catch(() => {}); }
+}
+async function stopSpeaking() {
+  const sp = S.speak; if (!sp || sp.phase !== "speaking") return;
+  clearInterval(SP.timer);
+  SP.listener?.stop(); SP.listener = null;
+  sp.samples = SP.meter?.stop() || []; SP.meter = null;
+  const clip = await SP.cam.stop(); SP.cam.close(); SP.cam = null;
+  await new Promise(r => setTimeout(r, 400));
+  sp.clip = clip; sp.url = clip ? URL.createObjectURL(clip.blob) : null;
+  sp.seconds = clip?.seconds || Math.round((Date.now() - SP.t0) / 1000);
+  sp.metrics = media.analyzeVoice(sp.samples, sp.transcript || "", sp.seconds, FILLERS);
+  if (sp.curveball) { const list = CURVEBALLS[sp.topic.k] || CURVEBALLS.opinion; sp.cbq = list[Math.floor(Math.random() * list.length)]; sp.phase = "curveball"; }
+  else sp.phase = "review";
+  renderSpeak();
+}
+function startCurveball() {
+  const sp = S.speak; sp.phase = "curveball-live"; sp.cba = ""; SP.t0 = Date.now();
+  SP.listener = new media.Listener(fin => { sp.cba = fin; const el = $("#cb-tx"); if (el) el.textContent = fin || "Listening…"; });
+  SP.listener.start();
+  SP.timer = setInterval(() => { const el = (Date.now() - SP.t0) / 1000; const c = $("#cb-time"); if (c) c.textContent = mmss(45 - el); if (el >= 45) stopCurveball(); }, 250);
+  renderSpeak();
+}
+function stopCurveball() {
+  clearInterval(SP.timer); SP.listener?.stop(); SP.listener = null;
+  setTimeout(() => { S.speak.phase = "review"; renderSpeak(); }, 350);
+}
+function abandonSpeak() {
+  clearInterval(SP.timer); SP.listener?.stop(); SP.listener = null; SP.meter?.stop(); SP.meter = null;
+  if (SP.cam) { SP.cam.stop(); SP.cam.close(); SP.cam = null; }
+  if (S.speak?.url) URL.revokeObjectURL(S.speak.url);
+  S.speak = null; keepSpeak(); renderSpeak();
+}
+
+const SPEAK_SCHEMA = obj({
+  scores: obj(Object.fromEntries(Object.keys(SPEAK_SKILLS).map(k => [k, { type: "integer" }]))),
+  framework_used: { type: "string" },
+  structure_map: { type: "array", items: obj({ step: { type: "string" }, quote: { type: "string" } }) },
+  headline: { type: "string" }, went_well: strList, fix: strList,
+  rewrite: obj({ said: { type: "string" }, better: { type: "string" }, why: { type: "string" } }),
+  model_outline: strList, delivery_notes: { type: "string" }, curveball_feedback: { type: "string" }, next_time: { type: "string" }
+});
+function metricsText(m) {
+  return `Length ${m.seconds}s; pace ${m.wpm} words per minute (natural talks run about 130-160); filler words ${m.fillerCount} (${m.fillersPerMin}/min: ${Object.entries(m.fillers).map(([f, c]) => f + " x" + c).join(", ") || "none"}; the transcript may drop "um" and "uh"); pauses of 0.5s+: ${m.pauses} (${m.pausesPerMin}/min, longest ${m.longestPause}s); volume variation ${m.volumeVariety} dB (under about 3 sounds flat); pitch range ${m.pitchRange ?? "unknown"} semitones (under about 4 sounds monotone, 8+ is expressive).`;
+}
+function scoreSpeech(sp, existing) {
+  if (!ai.ready()) { setView("settings"); flash("Add your Anthropic API key first."); return; }
+  const transcript = existing ? existing.transcript : sp.transcript;
+  if (!String(transcript || "").trim()) { flash("There's no transcript to score. Type or paste what you said first."); return; }
+  return guard("speak-score", async () => {
+    const src = existing || sp;
+    const fwKey = src.chosenFw || src.framework || TYPE_FRAMEWORK[src.topic?.k || src.type];
+    const fw = FRAMEWORKS[fwKey];
+    const r = await ai.askJSON(`You are a speaking coach. The learner did a timed public-speaking challenge: they researched a random topic with web search only (no AI), then spoke for about ${Math.round((src.target || 120) / 60 * 10) / 10} minutes.
+Learner: ${learner()}
+Topic: "${src.topic?.t || src.topicText}" (type: ${TYPE_LABEL[src.topic?.k || src.type]}). Challenge level ${src.level} of 6.
+${src.showFw || src.frameworkShown ? `Framework they were asked to use: ${fw.name}, steps: ${fw.steps.map(s => s[0] + " (" + s[1] + ")").join("; ")}.` : `They had to choose their own structure. The best fit for this topic type is ${fw.name}. They said they'd use: ${src.chosenFw ? FRAMEWORKS[src.chosenFw]?.name : "not stated"}.`}
+Their research notes: ${JSON.stringify(src.notes || {})}
+Transcript (speech recognition; punctuation is unreliable, and "um"/"uh" may be missing):
+${String(transcript).slice(0, 10000)}
+${src.cbq ? `Curveball follow-up question: "${src.cbq}". Their answer: ${src.cba || "(no answer)"}` : "No curveball question."}
+Measured delivery, computed from the audio: ${metricsText(src.metrics)}
+Score each skill 1-5, honestly: inflated scores break the difficulty ladder. 1 = missing; 2 = attempted but weak; 3 = solid and clear; 4 = polished and persuasive; 5 = what a skilled professional speaker would do.
+- point: was the main point clear and stated early (answer first)?
+- support: were the reasons specific, with evidence, numbers or an example from their research?
+- close: did they end by restating the point, sharper, instead of trailing off?
+- structure: did they follow the right framework in order, without rambling or repeating?
+- delivery: use the measured numbers (pace, fillers, pauses, vocal variety in volume and pitch) plus word choice. Vinh Giang's five vocal foundations: rate, volume, pitch, tonality, pause. Slowing down on the key point and pausing instead of using fillers are strengths.
+framework_used names the structure they actually followed. structure_map gives one entry per step of the expected framework with the learner's shortest quote that fills it, or "" if the step is missing.
+went_well and fix hold 1-3 items each. rewrite takes their weakest sentence (quoted exactly) and gives a stronger spoken version. model_outline gives one short line per framework step showing how a strong speaker would have structured this topic. delivery_notes is 2-3 sentences interpreting the measured numbers. curveball_feedback is one or two sentences, or "" if there was no curveball. next_time is one concrete thing to try.`, SPEAK_SCHEMA, { feature: "speak" });
+    const scores = {};
+    for (const k of Object.keys(SPEAK_SKILLS)) scores[k] = clamp(r.scores?.[k] ?? 3, 1, 5);
+    const result = { scores, overall: Math.round(avg(Object.values(scores))), framework_used: String(r.framework_used || ""),
+      structure_map: (r.structure_map || []).slice(0, 6), headline: String(r.headline || ""), went_well: strArr(r.went_well, 3), fix: strArr(r.fix, 3),
+      rewrite: r.rewrite?.better ? r.rewrite : null, model_outline: strArr(r.model_outline, 6), delivery_notes: String(r.delivery_notes || ""),
+      curveball_feedback: String(r.curveball_feedback || ""), next_time: String(r.next_time || "") };
+    const p = structuredClone(prof());
+    const spk = { ...defaultSpeak(), ...(p.speak || {}) };
+    const { s, from, to } = applyScore({ level: spk.level, up: spk.up, down: spk.down, scores: spk.scores }, result.overall, "normal", src.level, spk.scores.length < 3);
+    spk.level = s.level; spk.up = s.up; spk.down = s.down; spk.scores = s.scores;
+    for (const [k, v] of Object.entries(scores)) spk.skills[k] = [...(spk.skills[k] || []), v].slice(-12);
+    p.speak = spk; await saveProfile(p);
+    result.levelChange = from !== to ? { from, to } : null;
+    if (existing) { existing.score = result; await db.put("speeches", existing); }
+    else { await saveSpeech(sp, result); }
+  });
+}
+async function saveSpeech(sp, result) {
+  const id = db.uid("talk"), createdAt = new Date().toISOString();
+  let recordingId = null;
+  if (sp.clip?.blob?.size) {
+    recordingId = db.uid("vid");
+    const rec = { id: recordingId, createdAt, kind: "speech", title: sp.topic.t, speechId: id, seconds: sp.seconds, mime: sp.clip.mime, size: sp.clip.blob.size,
+      transcript: sp.transcript || "", notes: "", debrief: null, passes: {} };
+    await db.put("videos", { id: recordingId, blob: sp.clip.blob }); await db.put("recordings", rec); S.recordings.unshift(rec);
+  }
+  const doc = { id, createdAt, date: localDate(), level: sp.level, topicId: sp.topic.id, topic: sp.topic, type: sp.topic.k, framework: sp.fw, chosenFw: sp.chosenFw,
+    frameworkShown: sp.showFw, prepSec: sp.prepSec, target: sp.target, notes: sp.notes, transcript: sp.transcript || "", cbq: sp.cbq || null, cba: sp.cba || "",
+    metrics: sp.metrics, score: result || null, recordingId };
+  await db.put("speeches", doc); S.speeches.unshift(doc);
+  if (sp.url) URL.revokeObjectURL(sp.url);
+  S.speak = { phase: "done", savedId: id }; keepSpeak();
+}
+
+function lineChart(vals, { min, max, label }) {
+  const W = 600, H = 70, pad = 6, ns = "http://www.w3.org/2000/svg";
+  const pts = vals.map((v, i) => [pad + i * (W - 2 * pad) / Math.max(1, vals.length - 1), v]).filter(p => p[1] != null);
+  if (pts.length < 2) return h("p", { class: "small muted", text: label + ": not enough data." });
+  const y = v => H - pad - (Math.min(max, Math.max(min, v)) - min) * (H - 2 * pad) / (max - min);
+  const el = (tag, at) => { const e = document.createElementNS(ns, tag); for (const [k, v] of Object.entries(at)) e.setAttribute(k, v); return e; };
+  const svg = el("svg", { viewBox: `0 0 ${W} ${H}`, class: "spark", role: "img", "aria-label": label + " over the talk" });
+  svg.append(el("line", { x1: pad, x2: W - pad, y1: H - pad, y2: H - pad, stroke: "var(--line)", "stroke-width": 1 }));
+  svg.append(el("polyline", { points: pts.map(([x, v]) => x.toFixed(1) + "," + y(v).toFixed(1)).join(" "), fill: "none", stroke: "var(--accent)", "stroke-width": 1.5 }));
+  return h("div", null, h("span", { class: "eyebrow", text: label }), svg);
+}
+function metricsPanel(m, samples, target) {
+  const verdict = (v, lo, hi, low, mid, high) => v == null ? "" : v < lo ? low : v > hi ? high : mid;
+  const stat = (v, k, note) => h("div", { class: "stat" }, h("span", { class: "v num", text: v }), h("span", { class: "k", text: k }), note ? h("span", { class: "small muted", text: note }) : null);
+  return h("div", { class: "stack" },
+    h("div", { class: "stats" },
+      stat(mmss(m.seconds), "Length", target ? (m.seconds >= target * 0.9 ? "Hit the target" : "Target " + mmss(target)) : ""),
+      stat(m.wpm, "Words per minute", verdict(m.wpm, 120, 170, "On the slow side", "Natural pace", "Fast; slow down on key points")),
+      stat(m.fillerCount, "Filler words", m.fillerCount ? Object.entries(m.fillers).map(([f, c]) => f + " " + c).join(", ") : "Clean"),
+      stat(m.pausesPerMin, "Pauses per minute", verdict(m.pausesPerMin, 3, 15, "Few pauses; let points land", "Good use of pauses", "Lots of stops")),
+      stat(m.volumeVariety + " dB", "Volume variety", verdict(m.volumeVariety, 3, 99, "Flat volume", "Varied", "")),
+      stat(m.pitchRange == null ? "n/a" : m.pitchRange + " st", "Pitch range", verdict(m.pitchRange, 4, 8, "Close to monotone", "Some melody", "Expressive"))),
+    samples?.length ? lineChart(samples.map(s => s.db), { min: -60, max: -5, label: "Loudness" }) : null,
+    samples?.length ? lineChart(samples.map(s => s.hz), { min: 70, max: 350, label: "Pitch" }) : null,
+    h("p", { class: "small muted", text: "Measured on your device from the audio, with rough thresholds. Use the trend across talks more than any single number." }));
+}
+function speechResult(r) {
+  return h("div", { class: "stack" },
+    r.levelChange ? h("p", { class: "levelup " + (r.levelChange.to > r.levelChange.from ? "up" : "down"), text: "Speaking " + (r.levelChange.to > r.levelChange.from ? "up to level " : "back to level ") + r.levelChange.to + ": " + SPEAK_LEVELS[r.levelChange.to - 1].name }) : null,
+    h("h2", { class: "display", text: r.headline }),
+    h("div", { class: "stats" }, Object.entries(SPEAK_SKILLS).map(([k, l]) => h("div", { class: "stat" }, h("span", { class: "v num", text: r.scores[k] + "/5" }), h("span", { class: "k", text: l })))),
+    r.framework_used ? h("p", { class: "small" }, h("strong", { text: "Structure you used: " }), r.framework_used) : null,
+    r.structure_map.length ? h("div", { class: "stack" }, h("h3", { text: "How your talk mapped to the framework" }), r.structure_map.map(x => h("div", { class: "rewrite" }, h("span", { class: "small muted", text: x.step }), x.quote ? h("span", { text: "“" + x.quote + "”" }) : h("span", { class: "verdict wrong", text: "Missing" })))) : null,
+    r.went_well.length ? h("div", null, h("h3", { text: "What worked" }), h("ul", { class: "clean" }, r.went_well.map(t => h("li", { text: t })))) : null,
+    r.fix.length ? h("div", null, h("h3", { text: "What to fix" }), h("ul", { class: "clean" }, r.fix.map(t => h("li", { text: t })))) : null,
+    r.rewrite ? h("div", { class: "rewrite" }, h("span", { class: "said", text: r.rewrite.said }), h("span", { class: "better", text: r.rewrite.better }), h("span", { class: "small muted", text: r.rewrite.why })) : null,
+    r.delivery_notes ? h("p", null, h("strong", { text: "Delivery: " }), r.delivery_notes) : null,
+    r.curveball_feedback ? h("p", null, h("strong", { text: "Curveball: " }), r.curveball_feedback) : null,
+    r.model_outline.length ? h("div", null, h("h3", { text: "A model outline for this topic" }), h("ol", { class: "clean" }, r.model_outline.map(t => h("li", { text: t })))) : null,
+    r.next_time ? h("p", null, h("strong", { text: "Next time: " }), r.next_time) : null);
+}
+function frameworkCard(key, compact) {
+  const fw = FRAMEWORKS[key];
+  return h("div", { class: "fwcard" }, h("div", { class: "spread" }, h("strong", { text: fw.name }), h("span", { class: "small muted", text: fw.use })),
+    h("ol", { class: "clean small" }, fw.steps.map(([s, d]) => h("li", null, h("strong", { text: s + ": " }), d))),
+    compact ? null : h("p", { class: "small muted", text: "Example: " + fw.sample }));
+}
+
+function renderSpeak() {
+  const v = $("#v-speak"); if (!v) return;
+  if (S.view !== "speak") return;
+  const spk = speakProf(), lv = SPEAK_LEVELS[clamp(spk.level, 1, 6) - 1], sp = S.speak, out = [];
+  out.push(h("header", { class: "section-head" }, h("h2", { class: "display", text: "Speak" }),
+    h("p", { class: "muted", text: "Draw a random topic, research it with search only, then speak in a clear structure. Scored on structure and delivery." }),
+    h("p", { class: "small num" }, h("strong", { text: "Level " + lv.n + ": " + lv.name }), " · prep " + (lv.prep >= 60 ? lv.prep / 60 + " min" : lv.prep + " sec") + " · speak " + mmss(lv.target) + (lv.curveball ? " · plus a follow-up question" : "") + (spk.up ? " · " + spk.up + "/3 toward next level" : ""))));
+  const card = h("article", { class: "card lead" });
+  if (!sp || sp.phase === "done") {
+    const last = sp?.phase === "done" ? S.speeches.find(x => x.id === sp.savedId) : null;
+    if (last?.score) card.append(h("span", { class: "eyebrow", text: "Your talk · " + last.topic.t }), speechResult(last.score));
+    else if (last) card.append(h("span", { class: "eyebrow", text: "Saved" }), h("p", { text: "Your talk is saved without a score. You can score it from the history below." }));
+    else card.append(h("span", { class: "eyebrow", text: "Today's challenge" }), h("p", { text: lv.showFramework ? "You'll get a topic and the framework that fits it." : "You'll get a topic. Picking the right framework is part of the challenge." }));
+    card.append(h("div", { class: "row" }, h("button", { class: "primary", onclick: () => drawTopic(false) }, last ? "New challenge" : "Draw a topic")));
+  } else if (sp.phase === "draw") {
+    const sel = h("select", { id: "prep-time", onchange: e => { sp.prepSec = Number(e.target.value); keepSpeak(); } },
+      [[10, "10 seconds"], [120, "2 minutes"], [300, "5 minutes"], [600, "10 minutes"], [900, "15 minutes"]].map(([s, l]) => h("option", { value: s, selected: sp.prepSec === s }, l)));
+    card.append(h("span", { class: "eyebrow", text: TYPE_LABEL[sp.topic.k] + " · level " + sp.level }), h("h2", { class: "display topic", text: sp.topic.t }),
+      sp.showFw ? frameworkCard(sp.fw) : h("p", { class: "small", text: "Pick your own structure. The frameworks are listed further down this page." }),
+      h("div", { class: "row" }, h("label", { class: "eyebrow", for: "prep-time", text: "Research time" }), sel),
+      sp.prepSec >= 60 ? h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: sp.pledge, onchange: e => { sp.pledge = e.target.checked; keepSpeak(); } }), " I'll research with search only, no AI tools.") : null,
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: startResearch }, sp.prepSec >= 60 ? "Start research timer" : "Start the countdown"),
+        sp.redraws < 1 ? h("button", { onclick: () => drawTopic(true) }, "Redraw once") : null, h("button", { class: "ghost", onclick: abandonSpeak }, "Cancel")));
+  } else if (sp.phase === "research" || sp.phase === "ready") {
+    const q = encodeURIComponent(sp.topic.k === "impromptu" ? sp.topic.t : sp.topic.t.replace(/^(Explain|Pitch|Tell me about)\s+/i, ""));
+    const steps = sp.showFw ? FRAMEWORKS[sp.fw].steps.map(s => s[0]) : sp.chosenFw ? FRAMEWORKS[sp.chosenFw].steps.map(s => s[0]) : ["Main point", "Support", "Close"];
+    card.append(h("div", { class: "spread" }, h("span", { class: "eyebrow", text: sp.phase === "research" ? "Research" : "Ready" }),
+      sp.phase === "research" ? h("span", { class: "clock num", id: "speak-clock", text: mmss((sp.researchEnd - Date.now()) / 1000) }) : null),
+      h("h2", { class: "display topic", text: sp.topic.t }),
+      sp.phase === "research" && sp.prepSec >= 60 ? h("p", { class: "small" }, "Search: ",
+        h("a", { href: "https://www.google.com/search?q=" + q, target: "_blank", rel: "noopener" }, "Google"), " · ",
+        h("a", { href: "https://en.wikipedia.org/w/index.php?search=" + q, target: "_blank", rel: "noopener" }, "Wikipedia"), " · ",
+        h("a", { href: "https://news.google.com/search?q=" + q, target: "_blank", rel: "noopener" }, "Google News"), ". Keywords only in your notes, not full sentences.") : null,
+      !sp.showFw ? h("div", { class: "row" }, h("label", { class: "eyebrow", for: "fw-choice", text: "Framework I'll use" }),
+        h("select", { id: "fw-choice", onchange: e => { sp.chosenFw = e.target.value; keepSpeak(); renderSpeak(); } }, h("option", { value: "" }, "Choose"), Object.entries(FRAMEWORKS).map(([k, f]) => h("option", { value: k, selected: sp.chosenFw === k }, f.name)))) : null,
+      h("div", { class: "notes-grid" }, steps.map((s, i) => { const ta = h("textarea", { id: "note-" + i, class: "short", placeholder: s, oninput: e => { sp.notes[s] = e.target.value; keepSpeak(); } }); ta.value = sp.notes[s] || ""; return h("label", { class: "stack" }, h("span", { class: "eyebrow", text: s }), ta); })),
+      h("div", { class: "row" }, h("span", { class: "eyebrow", text: "Record as" }),
+        ["video", "audio"].map(m => h("label", { class: "toggle" }, h("input", { type: "radio", name: "speak-mode", checked: sp.mode === m, onchange: () => { sp.mode = m; keepSpeak(); } }), m === "video" ? " Video" : " Audio only"))),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: startSpeaking }, sp.phase === "research" ? "I'm ready, start speaking" : "Start speaking"), h("button", { class: "ghost", onclick: abandonSpeak }, "Cancel")),
+      h("p", { class: "small muted", text: "Aim for " + mmss(sp.target) + ". It stops automatically at " + mmss(sp.max) + ". Stand up if you can; Vinh Giang says how you rehearse is how you present." }));
+  } else if (sp.phase === "speaking") {
+    const fw = FRAMEWORKS[sp.chosenFw || "prep"];
+    card.append(h("div", { class: "spread" }, h("span", { class: "recdot static", text: "Recording" }), h("span", { class: "clock num", id: "speak-time", text: "0:00 / " + mmss(sp.target) })),
+      h("h2", { class: "display topic", text: sp.topic.t }),
+      sp.mode === "video" ? h("video", { class: "selfcam big", id: "speak-cam", playsinline: true, muted: true, autoplay: true }) : null,
+      h("ol", { class: "cues", id: "speak-cues" }, fw.steps.map(([s]) => h("li", { text: s }))),
+      h("div", { class: "meter" }, h("span", { id: "speak-level" }), h("small", { id: "speak-hz", class: "num" })),
+      h("p", { class: "live-tx", id: "speak-tx", text: "Listening…" }),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: stopSpeaking }, "Stop")));
+  } else if (sp.phase === "curveball" || sp.phase === "curveball-live") {
+    card.append(h("span", { class: "eyebrow", text: "Follow-up question" }), h("blockquote", { text: sp.cbq }),
+      sp.phase === "curveball" ? h("div", { class: "row" }, h("button", { class: "primary", onclick: startCurveball }, "Answer it (45 seconds)"), h("button", { class: "ghost", onclick: () => { sp.phase = "review"; renderSpeak(); } }, "Skip"))
+        : [h("span", { class: "clock num", id: "cb-time", text: "0:45" }), h("p", { class: "live-tx", id: "cb-tx", text: "Listening…" }), h("div", { class: "row" }, h("button", { class: "primary", onclick: stopCurveball }, "Done"))]);
+  } else if (sp.phase === "review") {
+    const ta = h("textarea", { id: "speak-transcript", oninput: e => { sp.transcript = e.target.value; } }); ta.value = sp.transcript || "";
+    card.append(h("span", { class: "eyebrow", text: "Review · " + sp.topic.t }),
+      sp.url ? (sp.mode === "video" ? h("video", { class: "playback", src: sp.url, controls: true, playsinline: true }) : h("audio", { src: sp.url, controls: true })) : null,
+      metricsPanel(sp.metrics, sp.samples, sp.target),
+      h("label", { class: "eyebrow", for: "speak-transcript", text: "Transcript (fix anything it misheard)" }), ta,
+      sp.cbq ? h("p", { class: "small" }, h("strong", { text: "Follow-up: " }), sp.cbq + " — " + (sp.cba || "(no answer)")) : null,
+      h("div", { class: "row" },
+        S.busy === "speak-score" ? h("span", { class: "thinking", text: "Scoring your talk" }) : h("button", { class: "primary", disabled: !!S.busy, onclick: () => { sp.metrics = media.analyzeVoice(sp.samples || [], sp.transcript || "", sp.seconds, FILLERS); scoreSpeech(sp); } }, "Score with Claude (about 0.3 cents)"),
+        h("button", { disabled: !!S.busy, onclick: async () => { await saveSpeech(sp, null); renderSpeak(); } }, "Save without scoring"),
+        h("button", { class: "ghost", onclick: abandonSpeak }, "Discard")));
+  }
+  out.push(card);
+  // history
+  if (S.speeches.length) out.push(h("div", { class: "card" }, h("h3", { text: "Your talks · " + S.speeches.length }), S.speeches.slice(0, 15).map(x => h("details", null,
+    h("summary", null, fmtDate(x.createdAt) + " · L" + x.level + " · " + TYPE_LABEL[x.type] + " · " + x.topic.t + (x.score ? " · " + x.score.overall + "/5" : " · not scored")),
+    x.metrics ? h("p", { class: "small muted num", text: mmss(x.metrics.seconds) + ", " + x.metrics.wpm + " wpm, " + x.metrics.fillerCount + " fillers, pitch range " + (x.metrics.pitchRange ?? "n/a") + " st" }) : null,
+    x.score ? speechResult(x.score) : h("button", { disabled: !!S.busy, onclick: () => scoreSpeech(null, x) }, "Score it now (about 0.3 cents)"),
+    x.recordingId ? h("p", { class: "small" }, h("a", { href: "#film", onclick: e => { e.preventDefault(); setView("film"); } }, "Watch it back in Film"), " with the three-pass review.") : null))));
+  // frameworks
+  out.push(h("details", { class: "card fold" }, h("summary", null, h("span", { class: "fold-title", text: "The frameworks" })),
+    h("p", { class: "small muted", text: "Match the structure to the question. Senior people in finance want the answer first, so every one of these leads with the point." }),
+    Object.keys(FRAMEWORKS).map(k => frameworkCard(k))));
+  out.push(warmupCard());
+  v.replaceChildren(...out);
+  if (sp?.phase === "speaking" && SP.cam?.stream && sp.mode === "video") { const pv = $("#speak-cam"); if (pv) { pv.srcObject = SP.cam.stream; pv.play().catch(() => {}); } }
+}
+
+/* ---------- Warm-up: siren, six emotions, tongue twisters ---------- */
+const WU = { stream: null, meter: null, lo: null, hi: null, twister: null, listener: null, t0: 0, result: null };
+async function sirenStart() {
+  try { WU.stream = await navigator.mediaDevices.getUserMedia({ audio: true }); } catch { flash("Microphone access was blocked."); return; }
+  WU.lo = WU.hi = null;
+  WU.meter = new media.VoiceMeter(WU.stream, s => {
+    if (s.hz && s.db > -45) { WU.lo = WU.lo ? Math.min(WU.lo, s.hz) : s.hz; WU.hi = WU.hi ? Math.max(WU.hi, s.hz) : s.hz; }
+    const el = $("#siren-read"); if (el) el.textContent = (s.hz ? s.hz + " Hz now" : "…") + (WU.lo ? " · range " + Math.round(12 * Math.log2(WU.hi / WU.lo) * 10) / 10 + " semitones (" + WU.lo + "-" + WU.hi + " Hz)" : "");
+  });
+  renderSpeak();
+}
+function sirenStop() { WU.meter?.stop(); WU.meter = null; WU.stream?.getTracks().forEach(t => t.stop()); WU.stream = null; renderSpeak(); }
+function twisterGo(speed) {
+  if (!media.canListen) { flash("Tongue-twister checking needs Chrome or Edge."); return; }
+  WU.result = null; WU.t0 = Date.now(); WU.speed = speed;
+  WU.listener = new media.Listener(fin => { const el = $("#tw-heard"); if (el) el.textContent = fin || "Listening…"; WU.heard = fin; });
+  WU.heard = ""; WU.listener.start(); renderSpeak();
+}
+function twisterStop() {
+  const l = WU.listener; WU.listener = null; l?.stop();
+  setTimeout(() => { WU.result = { acc: media.twisterAccuracy(WU.twister, WU.heard || ""), secs: Math.round((Date.now() - WU.t0) / 100) / 10 - 0.4, speed: WU.speed }; renderSpeak(); }, 400);
+}
+function warmupCard() {
+  if (!WU.twister) WU.twister = TWISTERS[Math.floor(Math.random() * TWISTERS.length)];
+  return h("details", { class: "card fold", open: WU.meter || WU.listener || WU.result ? true : null }, h("summary", null, h("span", { class: "fold-title", text: "Daily warm-up (5 minutes)" })),
+    h("p", { class: "small muted", text: "Based on Vinh Giang's drills. Do it standing, out loud, before a talk or a big call." }),
+    h("h3", { text: "1. The siren" }),
+    h("p", { class: "small", text: "Slide your voice from your lowest note up to your highest and back down, like a siren, for a minute or two. It widens your pitch range so you sound less monotone. The meter tracks the range you reach." }),
+    h("div", { class: "row" }, WU.meter ? h("button", { class: "primary", onclick: sirenStop }, "Stop") : h("button", { class: "primary", onclick: sirenStart }, "Start the siren meter"), h("span", { class: "small num", id: "siren-read" }, WU.meter ? "Listening…" : "")),
+    h("h3", { text: "2. Six emotions" }),
+    h("p", { class: "small", text: "Say “Good morning, everyone” six times, once per emotion. Change your face first: Giang calls your face the remote control for your voice." }),
+    h("div", { class: "row" }, EMOTIONS.map(e => h("span", { class: "tag", text: e }))),
+    h("h3", { text: "3. Tongue twisters" }),
+    h("p", { class: "small", text: "For clear pronunciation: say it slowly and perfectly first, then fast. The site checks how much it understood." }),
+    h("blockquote", { text: WU.twister }),
+    h("div", { class: "row" },
+      WU.listener ? [h("button", { class: "primary", onclick: twisterStop }, "Done"), h("span", { class: "small", id: "tw-heard", text: "Listening…" })]
+        : [h("button", { onclick: () => twisterGo("slow") }, "Slow round"), h("button", { onclick: () => twisterGo("fast") }, "Fast round"), h("button", { class: "ghost", onclick: () => { WU.twister = TWISTERS[(TWISTERS.indexOf(WU.twister) + 1) % TWISTERS.length]; WU.result = null; renderSpeak(); } }, "Next twister")]),
+    WU.result ? h("p", { class: "small num" }, h("strong", { text: WU.result.acc + "% understood" }), " in " + Math.max(0, WU.result.secs).toFixed(1) + "s (" + WU.result.speed + " round)." + (WU.result.acc >= 90 ? " Clean." : " Slow down and over-pronounce each word.")) : null);
 }
 
 /* ---------- Boot ---------- */
