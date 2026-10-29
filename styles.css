@@ -219,3 +219,13 @@ audio { width: 100%; max-width: 560px; }
 button.pill.done::after { content: " \2713"; color: var(--good); }
 .txview { line-height: 1.8; padding: 12px 14px; background: var(--paper); border: 1px solid var(--line); white-space: pre-wrap; }
 mark.filler { background: transparent; color: var(--bad); font-weight: 600; text-decoration: underline; text-decoration-color: var(--bad); }
+
+/* Learn tab */
+.lesson-list { display: flex; flex-direction: column; }
+button.lesson-row { display: grid; grid-template-columns: 44px 1fr auto; gap: 12px; align-items: center; text-align: left; border: 0; border-bottom: 1px solid var(--line); border-radius: 0; padding: 10px 2px; background: transparent; font-weight: 400; }
+button.lesson-row:hover { background: var(--sunk); }
+.lesson-row .lid { color: var(--accent); font-weight: 600; }
+.lesson-row .ltitle { font-size: 18px; }
+.drill-item { display: flex; flex-direction: column; gap: 6px; padding-bottom: 12px; border-bottom: 1px dashed var(--line); }
+.banned { color: var(--bad); text-decoration: line-through; }
+.source { color: var(--muted); border-top: 1px solid var(--line); padding-top: 10px; }

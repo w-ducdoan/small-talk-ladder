@@ -5,6 +5,7 @@ import { SKILLS, LEVELS, DEPTH, SETTINGS, KIND, TOPICS, KNOW_COLD } from "./curr
 import { BANK_A } from "./quiz-bank-a.js";
 import { BANK_B } from "./quiz-bank-b.js";
 const QUIZ_BANK = { ...BANK_A, ...BANK_B };
+import { LESSONS, STALL_PHRASES } from "./learn-data.js";
 import { FRAMEWORKS, TYPE_FRAMEWORK, TYPE_LABEL, SPEAK_LEVELS, SPEAK_SKILLS, SPEAK_TOPICS, CURVEBALLS, EMOTIONS, TWISTERS, FILLERS } from "./speak-data.js";
 
 /* ---------- Helpers ---------- */
@@ -42,10 +43,10 @@ const obj = (props) => ({ type: "object", properties: props, required: Object.ke
 /* ---------- State ---------- */
 const S = {
   settings: { apiKey: "", model: ai.DEFAULT_MODEL, voice: "", rate: 1, voiceMode: false, about: "" },
-  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {}, spend: { months: {} }, speeches: [], speak: null,
+  profile: null, plans: [], sessions: [], phrases: [], recordings: [], knowCold: {}, spend: { months: {} }, speeches: [], speak: null, learn: {}, learnFocus: null, learnOpen: null, drill2: null,
   live: null, busy: "", flash: "", view: "today", quiz: null, drill: null, lookup: null, ctl: null
 };
-const VIEWS = ["today", "speak", "cold", "film", "plan", "progress", "phrases", "settings"];
+const VIEWS = ["today", "learn", "speak", "cold", "film", "plan", "progress", "phrases", "settings"];
 
 function defaultProfile() {
   const skills = {};
@@ -69,6 +70,7 @@ async function loadAll() {
   S.profile = kvm.profile || null;
   S.knowCold = kvm.knowCold || {};
   S.spend = kvm.spend || { months: {} };
+  S.learn = kvm.learn || {}; S.learnFocus = kvm.learnFocus || null;
   const byNew = (a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt);
   S.speeches = speeches.sort(byNew); restoreSpeak();
   S.plans = plans.sort(byNew); S.sessions = sessions.sort(byNew); S.phrases = phrases; S.recordings = recordings.sort(byNew);
@@ -207,7 +209,8 @@ const SCHEMA = {
   debrief: obj({ scores: obj(SCORE_PROPS), headline: { type: "string" }, went_well: strList, fix: strList,
     rewrites: { type: "array", items: obj({ said: { type: "string" }, better: { type: "string" }, why: { type: "string" } }) },
     phrases: { type: "array", items: obj({ phrase: { type: "string" }, meaning: { type: "string" }, example: { type: "string" } }) },
-    used_phrase: orNull("boolean"), topic_comfort: { type: "integer" }, next_time: { type: "string" } }),
+    used_phrase: orNull("boolean"), topic_comfort: { type: "integer" }, next_time: { type: "string" },
+    technique: obj({ used: { type: "boolean" }, note: { type: "string" } }) }),
   plan: obj({ headline: { type: "string" }, focus_skills: strList, topics: strList, setting: { type: "string", enum: ["one_on_one", "group", "event", "mixed"] },
     partner_level_override: nullableInt, override_until: orNull("string"), sessions_per_week: { type: "integer" }, speak_per_week: { type: "integer" }, notes: strList,
     changes: { type: "array", items: obj({ change: { type: "string" }, why: { type: "string" } }) }, week_summary: { type: "string" } }),
@@ -224,7 +227,8 @@ function cleanDebrief(d, target) {
     rewrites: (d?.rewrites || []).filter(r => r && r.better).slice(0, 4).map(r => ({ said: String(r.said || ""), better: String(r.better), why: String(r.why || "") })),
     phrases: (d?.phrases || []).filter(p => p && p.phrase).slice(0, 3).map(p => ({ phrase: String(p.phrase).slice(0, 120), meaning: String(p.meaning || ""), example: String(p.example || "") })),
     used_phrase: d?.used_phrase === true ? true : d?.used_phrase === false ? false : null,
-    topic_comfort: clamp(d?.topic_comfort || 3, 1, 5), next_time: String(d?.next_time || "")
+    topic_comfort: clamp(d?.topic_comfort || 3, 1, 5), next_time: String(d?.next_time || ""),
+    technique: d?.technique ? { used: !!d.technique.used, note: String(d.technique.note || "") } : null
   };
 }
 const RUBRIC = `Rubric for each skill, 1-5: 1 = not attempted, or it broke the conversation; 2 = attempted but awkward or one-and-done; 3 = fine, nothing a native listener would notice, nothing memorable; 4 = smooth and genuinely engaging; 5 = what a socially skilled native speaker would do.
@@ -261,6 +265,7 @@ Drill spec:
 ${plan?.notes?.length ? "- This week's coaching notes: " + strArr(plan.notes, 4).join(" | ") : ""}
 ${next.phrase ? `- Give the learner a natural chance to use this phrase: "${next.phrase.phrase}" (${next.phrase.meaning || ""})` : ""}
 ${card ? "- Reference facts for this topic (use for the primer where useful): " + card.essentials.join(" ") : ""}
+${S.learnFocus ? "- The learner is practicing a technique from a lesson. Give the partner natural openings for it: " + lessonById(S.learnFocus.id).useIt : ""}
 ${recent.length ? "- Do not repeat these recent scenarios: " + recent.join("; ") : ""}
 Place it in a realistic moment from the learner's own life as described above (work, school, recruiting coffee chats, team dinners, events). Use invented names, never real people.
 Do not invent specific recent scores, trades, standings or news. The primer is evergreen facts plus how Americans usually talk about the topic, 3-4 short items.
@@ -271,7 +276,7 @@ The goal must make the learner practice the target skill specifically. "try" hol
       others: (r.others || []).filter(o => o?.name).slice(0, 2), goal: String(r.goal || SKILLS[next.skill].desc),
       opener: String(r.opener || "Hey, how's it going?"), primer: strArr(r.primer, 5), try: strArr(r.try, 4), turns: clamp(r.turns || 8, 5, 12)
     };
-    S.live = { phase: "chat", next, scenario: sc, turns: [{ who: "them", text: sc.opener, at: Date.now() }], ended: false, startedAt: new Date().toISOString() };
+    S.live = { technique: S.learnFocus?.id || null, phase: "chat", next, scenario: sc, turns: [{ who: "them", text: sc.opener, at: Date.now() }], ended: false, startedAt: new Date().toISOString() };
     if (S.settings.voiceMode) media.speak(sc.opener, voiceOpts());
   });
 }
@@ -334,7 +339,8 @@ ${transcript.slice(-12000)}
 Measured: ${m.questions} questions over ${m.turns} turns; the learner's share of words ${m.share}%.
 ${RUBRIC}
 Judge relative to the partner level. The target skill score is required; score other skills only where the transcript clearly shows them, else null.
-Give 2-4 rewrites ("said" must quote the learner exactly), favoring lines that sound translated or moves they missed. Give 1-3 phrases worth learning for this topic. topic_comfort is 1-5. next_time is one concrete thing to try next session.`, SCHEMA.debrief, { feature: "rep" }), L.next.skill);
+Give 2-4 rewrites ("said" must quote the learner exactly), favoring lines that sound translated or moves they missed. Give 1-3 phrases worth learning for this topic. topic_comfort is 1-5. next_time is one concrete thing to try next session.
+${L.technique ? `Technique being practiced from a lesson: "${lessonById(L.technique).title}": ${lessonById(L.technique).useIt} Set technique.used to whether they clearly did it, and technique.note to one sentence quoting where they did, or how they could have.` : "No technique is being practiced: technique.used is false and technique.note is empty."}`, SCHEMA.debrief, { feature: "rep" }), L.next.skill);
     await saveRep(L, d, m);
   });
 }
@@ -359,6 +365,13 @@ async function saveRep(L, deb, m) {
       await db.put("videos", { id: rec.id, blob: clip.blob }); await db.put("recordings", rec); S.recordings.unshift(rec);
       session.recordingId = rec.id;
     }
+  }
+  if (L.technique) {
+    session.technique = { id: L.technique, used: !!deb.technique?.used, note: deb.technique?.note || "" };
+    const lp = learnProg(L.technique);
+    S.learn = { ...S.learn, [L.technique]: { ...lp, uses: (lp.uses || 0) + (session.technique.used ? 1 : 0), tries: (lp.tries || 0) + 1 } };
+    await db.kvSet("learn", S.learn);
+    if (S.learnFocus?.id === L.technique) { const left = S.learnFocus.left - 1; S.learnFocus = left > 0 ? { ...S.learnFocus, left } : null; await db.kvSet("learnFocus", S.learnFocus); }
   }
   await db.put("sessions", session); S.sessions.unshift(session);
   await saveProfile(p);
@@ -436,6 +449,7 @@ ${sess}
 Recent scored videos:
 ${vids}
 Speaking challenges (timed research, then a structured 1-2 minute talk): ladder level ${speakProf().level} of 6 (${SPEAK_LEVELS.map(l => l.n + " " + l.name).join(", ")}); recent scores ${speakProf().scores.slice(-5).join(",") || "none"}; talks in the last 7 days ${S.speeches.filter(x => daysSince(x.createdAt) < 7).length}.
+Lessons (Learn tab): complete ${LESSONS.filter(l => learnProg(l.id).done).map(l => l.id + " " + l.title).join(", ") || "none"}; not yet done ${LESSONS.filter(l => !learnProg(l.id).done).map(l => l.id + " " + l.title).join(", ")}. Mention in notes which lesson to do next when it fits the learner's weakest skills.
 Request: ${ask}
 Rules: focus_skills holds 1-3 keys from [${Object.keys(SKILLS).join(", ")}], usually the weakest unless the learner asked otherwise. topics holds 2-5 keys from [${Object.keys(TOPICS).join(", ")}]. partner_level_override is null, or 1-6 only when the learner asked to jump to or hold a level; override_until is YYYY-MM-DD or null. sessions_per_week is 3-7, lighter when the learner says a week is heavy. speak_per_week is 1-5 speaking challenges. Keep anything the learner did not ask to change. Every change needs a reason a person would accept, citing evidence from the reps or the calendar. notes holds 2-4 short coaching notes.`, SCHEMA.plan, { feature: "plan" });
     const doc = {
@@ -616,6 +630,7 @@ async function deleteRecording(rec) {
 /* ---------- Rendering ---------- */
 function setView(v) {
   if (!VIEWS.includes(v)) v = "today";
+  if (S.view === "learn" && v !== "learn") stopLearnAudio();
   S.view = v;
   if (location.hash !== "#" + v) history.replaceState(null, "", "#" + v);
   for (const a of document.querySelectorAll("nav.tabs a")) { if (a.dataset.v === v) a.setAttribute("aria-current", "page"); else a.removeAttribute("aria-current"); }
@@ -624,7 +639,7 @@ function setView(v) {
 }
 function render() {
   renderMini(); renderStatus();
-  ({ today: renderToday, speak: renderSpeak, cold: renderCold, film: renderFilm, plan: renderPlan, progress: renderProgress, phrases: renderPhrases, settings: renderSettings })[S.view]();
+  ({ today: renderToday, learn: renderLearn, speak: renderSpeak, cold: renderCold, film: renderFilm, plan: renderPlan, progress: renderProgress, phrases: renderPhrases, settings: renderSettings })[S.view]();
 }
 function renderMini() {
   const p = prof();
@@ -674,6 +689,11 @@ function renderToday() {
       S.busy === "scenario" ? h("span", { class: "thinking", text: "Setting the scene" }) : h("button", { class: "primary", onclick: () => startRep(), disabled: !!S.busy }, "Start today's rep"),
       h("label", { class: "toggle" }, h("input", { type: "checkbox", id: "voice-mode", checked: S.settings.voiceMode, onchange: async e => { S.settings.voiceMode = e.target.checked; await saveSettings(); } }), " Voice mode")),
     h("p", { class: "small muted", text: media.canListen ? "Voice mode reads the partner's lines aloud. Tap Speak to answer out loud; the text appears as you talk." : "Your browser can't do speech recognition, so you'll type replies. Chrome or Edge adds Speak buttons." })));
+  const nl = nextLesson();
+  if (S.learnFocus || nl) out.push(h("div", { class: "card" }, h("span", { class: "eyebrow", text: "Learn" }),
+    S.learnFocus ? h("p", null, "Practicing ", h("strong", { text: "\u201c" + lessonById(S.learnFocus.id).title + "\u201d" }), " in your reps: " + S.learnFocus.left + " left. " + lessonById(S.learnFocus.id).useIt)
+      : h("p", null, "Next lesson: ", h("strong", { text: nl.id + ". " + nl.title }), ". About 10 minutes, and the drill is free."),
+    h("div", { class: "row" }, h("button", { onclick: () => S.learnFocus ? openLesson(S.learnFocus.id) : openLesson(nl.id) }, S.learnFocus ? "Review the lesson" : "Start the lesson"))));
   const talks = S.speeches.filter(x => daysSince(x.createdAt) < 7).length;
   out.push(h("div", { class: "card" }, h("div", { class: "spread" }, h("span", { class: "eyebrow", text: "Speaking challenge" }), h("span", { class: "small muted num", text: talks + " of " + (plan?.speak_per_week || 2) + " talks this week" })),
     h("p", { text: "Random topic, timed research with search only, then a structured talk. You're on level " + speakProf().level + ": " + SPEAK_LEVELS[speakProf().level - 1].name + "." }),
@@ -746,6 +766,7 @@ function doneView(s) {
     ladderNote(s.skill), debriefBlock(d),
     s.phrase ? h("p", { class: "small" }, "Assigned phrase “" + s.phrase + "”: ", h("strong", { text: d.used_phrase ? "used" : "not used yet" })) : null,
     d.next_time ? h("p", null, h("strong", { text: "Next time: " }), d.next_time) : null,
+    s.technique ? h("p", { class: "rewrite" }, h("span", { class: "small muted", text: "Lesson technique: " + lessonById(s.technique.id).title }), h("span", { class: "verdict " + (s.technique.used ? "right" : "wrong"), text: s.technique.used ? "You used it." : "Not this time." }), s.technique.note ? h("span", { class: "small", text: s.technique.note }) : null) : null,
     s.recordingId ? h("p", { class: "small" }, "The video of this rep is saved in ", h("a", { href: "#film", onclick: e => { e.preventDefault(); setView("film"); } }, "Film"), ".") : null,
     h("div", { class: "row" }, h("button", { class: "primary", onclick: () => { S.live = null; renderToday(); } }, "Back to today")))];
 }
@@ -955,6 +976,9 @@ function renderProgress() {
       h("span", { class: "lmeta", text: lvName(s.level) + (s.up ? " · " + s.up + "/3 toward next" : "") + (s.down ? " · 1 rough rep" : "") + ((s.scores || []).length ? " · last " + s.scores.slice(-3).join(", ") : "") })));
   }
   out.push(spendCard());
+  out.push(h("article", { class: "card" }, h("h3", { text: "Lessons" }),
+    h("p", { class: "small num", text: LESSONS.filter(l => learnProg(l.id).done).length + " of " + LESSONS.length + " complete" }),
+    h("ul", { class: "clean small num" }, LESSONS.filter(l => learnProg(l.id).attempts).map(l => { const lp = learnProg(l.id); return h("li", { text: l.id + " " + l.title + ": best " + lp.best + "/5 over " + lp.attempts + " drill(s)" + (lp.tries ? ", used in " + (lp.uses || 0) + " of " + lp.tries + " reps" : "") }); }))));
   out.push(h("article", { class: "card" }, h("h2", { class: "display", text: "The ladder" }), h("p", { class: "small muted", text: LEVELS.map(l => l.n + " " + l.name).join(" · ") }), lad));
   const spk = speakProf();
   out.push(h("article", { class: "card" }, h("h2", { class: "display", text: "Speaking ladder" }),
@@ -1384,6 +1408,197 @@ function warmupCard() {
       WU.listener ? [h("button", { class: "primary", onclick: twisterStop }, "Done"), h("span", { class: "small", id: "tw-heard", text: "Listening…" })]
         : [h("button", { onclick: () => twisterGo("slow") }, "Slow round"), h("button", { onclick: () => twisterGo("fast") }, "Fast round"), h("button", { class: "ghost", onclick: () => { WU.twister = TWISTERS[(TWISTERS.indexOf(WU.twister) + 1) % TWISTERS.length]; WU.result = null; renderSpeak(); } }, "Next twister")]),
     WU.result ? h("p", { class: "small num" }, h("strong", { text: WU.result.acc + "% understood" }), " in " + Math.max(0, WU.result.secs).toFixed(1) + "s (" + WU.result.speed + " round)." + (WU.result.acc >= 90 ? " Clean." : " Slow down and over-pronounce each word.")) : null);
+}
+
+/* ---------- Learn: lessons with free on-device drills ---------- */
+const LN = { listener: null, timer: null, t0: 0 };
+const learnProg = id => S.learn[id] || { attempts: 0, best: null, done: false, history: [] };
+const lessonById = id => LESSONS.find(l => l.id === id);
+const STOP = new Set(["the", "a", "an", "and", "or", "but", "i", "i'm", "my", "we", "we're", "you", "it", "it's", "to", "of", "in", "on", "for", "at", "is", "was", "just", "so", "this", "that", "with", "got", "get", "from", "last", "next", "week", "lot", "about", "been", "have", "had", "back", "really"]);
+const normWords = t => String(t).toLowerCase().replace(/[^a-z' ]+/g, " ").split(/\s+/).filter(Boolean);
+function hasQuestion(t) {
+  const s = String(t).toLowerCase();
+  return s.includes("?") || /\b(how|what|where|when|why|who|which)\b/.test(s) || /\b(do|did|are|have|were|is|was|would|could|can|will)\s+(you|it|they|we|he|she)\b/.test(s) || /\b(and|how about|what about)\s+you\b/.test(s);
+}
+function countPhrases(t, list) { const s = " " + normWords(t).join(" ") + " "; return list.reduce((a, p) => a + (s.split(" " + p + " ").length - 1), 0); }
+function fillerCount(t) { return countPhrases(t, FILLERS); }
+async function saveLearn(id, score, passNow) {
+  const p = learnProg(id);
+  const best = p.best == null ? score : Math.max(p.best, score);
+  S.learn = { ...S.learn, [id]: { attempts: p.attempts + 1, best, done: p.done || passNow, history: [...(p.history || []), { at: new Date().toISOString(), score }].slice(-20), last: new Date().toISOString() } };
+  await db.kvSet("learn", S.learn);
+}
+async function setFocus(id) {
+  S.learnFocus = id ? { id, left: 3 } : null;
+  await db.kvSet("learnFocus", S.learnFocus);
+  flash(id ? "Your next 3 conversation reps will practice “" + lessonById(id).title + "”, and the debrief will check it." : "Practice focus cleared.");
+  renderLearn();
+}
+function nextLesson() { return LESSONS.find(l => !learnProg(l.id).done && l.id !== "F6") || null; }
+
+function openLesson(id) { stopLearnAudio(); S.learnOpen = id; S.drill2 = null; setView("learn"); window.scrollTo(0, 0); }
+function stopLearnAudio() { if (LN.listener) { LN.listener.stop(); LN.listener = null; } clearInterval(LN.timer); media.stopSpeaking(); stopMic(); }
+
+// --- engine: say (spoken items) ---
+function sayDrillState(lesson) { return { kind: "say", items: lesson.drill.items.map(it => ({ ...it, said: "", ok: null, why: "" })) }; }
+function checkSay(lesson, it) {
+  const d = lesson.drill, said = it.said.trim();
+  if (!said) { it.ok = null; return; }
+  if (d.mode === "repeat") { const acc = media.twisterAccuracy(it.target, said); it.ok = acc >= 80; it.why = acc + "% matched" + (it.ok ? "" : ". Say it again, a little slower."); return; }
+  const n = normWords(said).length, q = hasQuestion(said);
+  if (d.mode === "reply") {
+    const reasons = [];
+    if (n < d.minWords) reasons.push("a bit short; add one detail");
+    if (n > d.maxWords) reasons.push("too long for small talk");
+    if (d.needQuestion && !q) reasons.push("no question back");
+    it.ok = !reasons.length; it.why = it.ok ? n + " words, with a question back. Nice." : "Close: " + reasons.join(", ") + "."; return;
+  }
+  if (d.mode === "followup") {
+    const theirs = new Set(normWords(it.prompt).filter(w => w.length > 3 && !STOP.has(w)));
+    const reused = normWords(said).filter(w => theirs.has(w) || [...theirs].some(t => t.slice(0, 5) === w.slice(0, 5) && w.length > 4));
+    it.ok = q && reused.length > 0; it.why = !q ? "That's not a question yet." : !reused.length ? "It's a question, but it doesn't build on what they said." : "Builds on “" + reused[0] + "”. Good follow-up."; return;
+  }
+}
+function sayDrillView(lesson, st) {
+  const d = lesson.drill;
+  const rows = st.items.map((it, i) => {
+    const ta = h("textarea", { id: "ld-" + i, class: "short", placeholder: d.mode === "repeat" ? "Say it back" : "Your reply", oninput: e => { it.said = e.target.value; } }); ta.value = it.said;
+    return h("div", { class: "drill-item" },
+      h("div", { class: "row" }, h("button", { class: "pill", onclick: () => media.speak(it.prompt, voiceOpts()) }, "Play"), h("span", { class: d.mode === "repeat" ? "better" : "", text: d.mode === "repeat" || d.mode === "followup" ? it.prompt : "“" + it.prompt + "”" })),
+      ta, h("div", { class: "row" }, micButton(ta, "Speak", () => { it.said = ta.value; checkSay(lesson, it); renderLearn(); }),
+        h("button", { class: "pill", onclick: () => { it.said = ta.value; checkSay(lesson, it); renderLearn(); } }, "Check"),
+        it.ok == null ? null : h("span", { class: "verdict " + (it.ok ? "right" : "wrong"), text: (it.ok ? "Pass. " : "") + it.why })));
+  });
+  const passed = st.items.filter(it => it.ok).length;
+  return h("div", { class: "stack" }, rows,
+    h("div", { class: "row" }, h("span", { class: "num", text: passed + " of " + st.items.length + " passed (need " + d.pass + ")" }),
+      h("button", { class: "primary", onclick: async () => { const score = Math.round(5 * passed / st.items.length); await saveLearn(lesson.id, score, passed >= d.pass); flash(passed >= d.pass ? "Lesson complete." : "Saved. Keep going until " + d.pass + " pass."); renderLearn(); } }, "Finish drill")));
+}
+
+// --- engine: choose (multiple choice, then say it) ---
+function chooseDrillState(lesson) { return { kind: "choose", checked: false, items: lesson.drill.items.map(it => ({ ...it, opts: shuffle(it.options.map((t, k) => ({ t, right: k === it.a }))), choice: null, said: "" })) }; }
+function chooseDrillView(lesson, st) {
+  const rows = st.items.map((it, n) => h("fieldset", { class: "mcq" },
+    h("legend", null, h("button", { class: "pill", type: "button", onclick: () => media.speak(it.line, voiceOpts()) }, "Play"), " ", it.line),
+    it.opts.map((o, k) => h("label", { class: st.checked ? (o.right ? "opt right" : k === it.choice ? "opt wrong" : "opt") : "opt" },
+      h("input", { type: "radio", name: "lc-" + n, checked: it.choice === k, disabled: st.checked, onchange: () => { it.choice = k; } }), " ", o.t)),
+    st.checked ? h("p", { class: "small muted", text: (it.opts[it.choice]?.right ? "Right. " : "Not quite. ") + it.why }) : null,
+    st.checked ? (() => { const ta = h("textarea", { id: "lcs-" + n, class: "short", placeholder: "Now say the best line out loud, in your own words", oninput: e => { it.said = e.target.value; } }); ta.value = it.said; return [ta, h("div", { class: "row" }, micButton(ta))]; })() : null));
+  const right = st.items.filter(it => it.opts[it.choice]?.right).length;
+  return h("div", { class: "stack" }, rows,
+    !st.checked ? h("div", { class: "row" }, h("button", { class: "primary", onclick: async () => {
+      if (st.items.some(it => it.choice == null)) { flash("Pick an answer for each one."); return; }
+      st.checked = true; const r = st.items.filter(it => it.opts[it.choice]?.right).length;
+      await saveLearn(lesson.id, Math.round(5 * r / st.items.length), r >= lesson.drill.pass); renderLearn();
+    } }, "Check my answers")) : h("p", { class: "levelup " + (right >= lesson.drill.pass ? "up" : ""), text: right + " of " + st.items.length + (right >= lesson.drill.pass ? ". Lesson complete." : ". Try again to finish the lesson.") }));
+}
+
+// --- engine: talk (timed spoken rounds) ---
+function talkDrillState(lesson) {
+  const ps = lesson.drill.prompts;
+  return { kind: "talk", prompt: ps[Math.floor(Math.random() * ps.length)], short: false, round: 0, results: [], live: false, text: "", segs: [] };
+}
+function talkRounds(lesson, st) { return st.short && lesson.drill.shortRounds ? lesson.drill.shortRounds : lesson.drill.rounds; }
+function startTalkRound(lesson, st) {
+  if (!media.canListen) { flash("This drill needs speech recognition: use Chrome or Edge."); return; }
+  const secs = talkRounds(lesson, st)[st.round];
+  st.live = true; st.text = ""; st.segs = []; LN.t0 = Date.now();
+  LN.listener = new media.Listener((fin, interim, segs) => { st.text = fin; st.segs = segs; const el = $("#talk-tx"); if (el) el.textContent = (fin + (interim ? " " + interim : "")).trim() || "Listening…";
+    const fc = $("#talk-fillers"); if (fc && lesson.drill.fillerTarget) fc.textContent = fillerCount(fin) + " fillers"; });
+  LN.listener.start();
+  LN.timer = setInterval(() => { const el = (Date.now() - LN.t0) / 1000; const c = $("#talk-time"); if (c) c.textContent = mmss(secs - el); if (el >= secs) stopTalkRound(lesson, st); }, 250);
+  renderLearn();
+}
+function stopTalkRound(lesson, st) {
+  clearInterval(LN.timer); const l = LN.listener; LN.listener = null; l?.stop();
+  setTimeout(async () => {
+    const d = lesson.drill, secs = Math.max(1, (Date.now() - LN.t0) / 1000 - 0.35), text = st.text;
+    const words = normWords(text).length, wpm = Math.round(words / (secs / 60));
+    const ts = st.segs.map(s => s.t); let stalls = 0; for (let i = 1; i < ts.length; i++) if (ts[i] - ts[i - 1] > 3) stalls++;
+    if (ts.length && ts[0] > 4) stalls++;
+    const fillers = fillerCount(text), fpm = Math.round(fillers / (secs / 60) * 10) / 10;
+    const banned = d.banned && st.prompt.banned ? countPhrases(text, [st.prompt.banned.toLowerCase()]) + countPhrases(text, [st.prompt.banned.toLowerCase() + "s"]) : 0;
+    const stallsUsed = d.stall ? countPhrases(text, STALL_PHRASES) : 0;
+    st.results.push({ secs: Math.round(secs), words, wpm, stalls, fillers, fpm, banned, stallsUsed, text });
+    st.live = false; st.round++;
+    if (st.round >= talkRounds(lesson, st).length) await scoreTalk(lesson, st);
+    renderLearn();
+  }, 400);
+}
+async function scoreTalk(lesson, st) {
+  const d = lesson.drill, r = st.results, last = r.at(-1);
+  let score, note;
+  if (d.banned) { score = clamp(5 - (last.banned ? 2 : 0) - Math.max(0, last.stalls - 1) - (last.words < 50 ? 1 : 0), 1, 5); note = (last.banned ? "You said the banned word " + last.banned + " time(s). " : "You never said the banned word. ") + last.stalls + " stall(s) over 3 seconds, " + last.words + " words."; }
+  else if (d.stall) { score = clamp(2 * Math.min(last.stallsUsed, 2) + (last.fpm <= 3 ? 1 : 0), 1, 5); note = last.stallsUsed + " stall phrase(s) used, " + last.fpm + " fillers per minute."; }
+  else if (d.fillerTarget) { score = last.fpm <= 2 ? 5 : last.fpm <= 3 ? 4 : last.fpm <= 4 ? 3 : last.fpm <= 6 ? 2 : 1; note = last.fpm + " fillers per minute (target under " + d.fillerTarget + ")."; }
+  else if (d.fourThreeTwo) { const gain = r[0].wpm ? Math.round(100 * (r[2].wpm - r[0].wpm) / r[0].wpm) : 0; score = gain > 0 ? 5 : 3; note = "Words per minute: " + r.map(x => x.wpm).join(" → ") + " (" + (gain >= 0 ? "+" : "") + gain + "% from round 1 to 3)."; }
+  else if (d.story) { score = last.secs <= 25 && last.words >= 30 ? 5 : last.secs <= 30 ? 4 : 3; note = "Round 1: " + r[0].secs + "s, " + r[0].words + " words. Round 2: " + last.secs + "s, " + last.words + " words."; }
+  else { score = 3; note = ""; }
+  const planned = talkRounds(lesson, st).at(-1);
+  if (d.fourThreeTwo && r.some((x, i) => x.secs < talkRounds(lesson, st)[i] * 0.6)) { score = Math.min(score, 2); note = "Use most of each round's time so the speed-up means something. " + note; }
+  else if ((d.banned || d.stall || d.fillerTarget) && last.secs < planned * 0.6) { score = Math.min(score, 2); note = "You stopped at " + last.secs + "s. Keep going for most of the " + mmss(planned) + " so it counts. " + note; }
+  st.score = score; st.note = note;
+  await saveLearn(lesson.id, score, score >= d.pass);
+}
+function talkDrillView(lesson, st) {
+  const d = lesson.drill, rounds = talkRounds(lesson, st);
+  const out = [h("blockquote", { text: st.prompt.text }),
+    st.prompt.banned ? h("p", null, "Banned word: ", h("strong", { class: "banned", text: st.prompt.banned }), " (and its plural). Talk around it.") : null];
+  if (d.shortRounds && st.round === 0 && !st.live) out.push(h("label", { class: "toggle" }, h("input", { type: "checkbox", checked: st.short, onchange: e => { st.short = e.target.checked; renderLearn(); } }), " Short version (" + d.shortRounds.map(mmss).join(", ") + ")"));
+  if (rounds.length > 1) out.push(h("ol", { class: "cues" }, rounds.map((s, i) => h("li", { class: i === st.round && st.round < rounds.length ? "now" : "", text: "Round " + (i + 1) + ": " + mmss(s) }))));
+  st.results.forEach((x, i) => out.push(h("p", { class: "small num", text: "Round " + (i + 1) + ": " + x.secs + "s, " + x.words + " words, " + x.wpm + " wpm, " + x.fillers + " fillers" + (d.banned ? ", " + x.stalls + " long stalls" : "") + (d.stall ? ", " + x.stallsUsed + " stall phrases" : "") })));
+  if (st.live) out.push(h("div", { class: "spread" }, h("span", { class: "recdot static", text: "Listening" }), h("span", { class: "clock num", id: "talk-time", text: mmss(rounds[st.round]) })),
+    d.fillerTarget ? h("p", { class: "small num", id: "talk-fillers", text: "0 fillers" }) : null,
+    h("p", { class: "live-tx", id: "talk-tx", text: "Listening…" }), h("div", { class: "row" }, h("button", { class: "primary", onclick: () => stopTalkRound(lesson, st) }, "Stop")));
+  else if (st.round < rounds.length) out.push(h("div", { class: "row" }, h("button", { class: "primary", onclick: () => startTalkRound(lesson, st) }, st.round === 0 ? "Start (" + mmss(rounds[0]) + ")" : "Start round " + (st.round + 1) + " (" + mmss(rounds[st.round]) + ")"),
+    st.round === 0 ? h("button", { class: "ghost", onclick: () => { S.drill2 = talkDrillState(lesson); renderLearn(); } }, "Another prompt") : null));
+  else {
+    const fillerText = st.results.at(-1)?.text || "";
+    out.push(h("p", { class: "levelup " + (st.score >= d.pass ? "up" : ""), text: st.score + " of 5" + (st.score >= d.pass ? ". Lesson complete." : ". Try again.") }), h("p", { text: st.note }),
+      fillerText ? h("details", null, h("summary", null, "Your transcript, fillers in red"), h("div", { class: "txview" }, fillerMarkup(fillerText))) : null,
+      h("div", { class: "row" }, h("button", { onclick: () => { S.drill2 = talkDrillState(lesson); renderLearn(); } }, "Go again with a new prompt")));
+  }
+  return h("div", { class: "stack" }, out);
+}
+
+function renderLearn() {
+  const v = $("#v-learn"); if (!v || S.view !== "learn") return;
+  const lesson = S.learnOpen ? lessonById(S.learnOpen) : null;
+  if (lesson) {
+    if (!S.drill2) S.drill2 = lesson.drill.engine === "say" ? sayDrillState(lesson) : lesson.drill.engine === "choose" ? chooseDrillState(lesson) : talkDrillState(lesson);
+    const p = learnProg(lesson.id), focus = S.learnFocus?.id === lesson.id;
+    v.replaceChildren(
+      h("div", { class: "row" }, h("button", { class: "ghost", onclick: () => { stopLearnAudio(); S.learnOpen = null; S.drill2 = null; renderLearn(); } }, "← All lessons")),
+      h("article", { class: "card lead" },
+        h("span", { class: "eyebrow", text: (lesson.track === "fluency" ? "Fluency" : "Conversation") + " · Lesson " + lesson.id + (p.done ? " · complete" : "") }),
+        h("h2", { class: "display", text: lesson.title }),
+        lesson.idea.map(t => h("p", { text: t })),
+        lesson.examples.length ? h("div", { class: "stack" }, h("h3", { text: "Hear it" }), lesson.examples.map(e => h("div", { class: "row" }, h("button", { class: "pill", onclick: () => media.speak(e.replace(/^(They|You): /, ""), voiceOpts()) }, "Play"), h("span", { text: e })))) : null,
+        h("p", { class: "small source" }, h("strong", { text: "Source: " }), lesson.source, h("br"), h("strong", { text: "Evidence: " }), lesson.evidence)),
+      h("article", { class: "card" }, h("h3", { text: "Drill it" }), h("p", { class: "small muted", text: lesson.drill.intro + " Free: no Claude calls." }),
+        S.drill2.kind === "say" ? sayDrillView(lesson, S.drill2) : S.drill2.kind === "choose" ? chooseDrillView(lesson, S.drill2) : talkDrillView(lesson, S.drill2)),
+      h("article", { class: "card" }, h("h3", { text: "Use it" }),
+        h("p", { text: "Practice it in real conversation: " + lesson.useIt }),
+        h("div", { class: "row" }, focus ? [h("span", { class: "tag good", text: "Active: " + S.learnFocus.left + " reps left" }), h("button", { class: "ghost", onclick: () => setFocus(null) }, "Stop practicing this")]
+          : h("button", { class: "primary", onclick: () => setFocus(lesson.id) }, "Practice it in my next 3 reps")),
+        h("p", { class: "small muted", text: "The scenario will give you chances to use it, and the debrief will tell you whether you did." })));
+    return;
+  }
+  const done = LESSONS.filter(l => learnProg(l.id).done).length, nl = nextLesson();
+  const list = track => LESSONS.filter(l => l.track === track).map(l => {
+    const p = learnProg(l.id);
+    return h("button", { class: "lesson-row", onclick: () => openLesson(l.id) },
+      h("span", { class: "lid num", text: l.id }), h("span", { class: "ltitle", text: l.title + (l.id === "F6" ? " (optional)" : "") }),
+      h("span", { class: "tag " + (p.done ? "good" : p.attempts ? "accent" : ""), text: p.done ? "Done" : p.attempts ? "Practiced" : "New" }));
+  });
+  v.replaceChildren(
+    h("header", { class: "section-head" }, h("h2", { class: "display", text: "Learn" }),
+      h("p", { class: "muted", text: "Short lessons built on research and proven teaching methods. Each one: the idea, examples you can hear, a free spoken drill, then you use it in your next conversation reps." }),
+      h("p", { class: "small num", text: done + " of " + LESSONS.length + " lessons complete" + (S.learnFocus ? " · practicing “" + lessonById(S.learnFocus.id).title + "” (" + S.learnFocus.left + " reps left)" : "") })),
+    nl ? h("article", { class: "card lead" }, h("span", { class: "eyebrow", text: "Up next" }), h("h3", { text: nl.id + ". " + nl.title }), h("p", { class: "small", text: nl.idea[0] }),
+      h("div", { class: "row" }, h("button", { class: "primary", onclick: () => openLesson(nl.id) }, "Start lesson"))) : null,
+    h("article", { class: "card" }, h("h3", { text: "Fluency: when the words won't come" }), h("div", { class: "lesson-list" }, list("fluency"))),
+    h("article", { class: "card" }, h("h3", { text: "Conversation: what to say next" }), h("div", { class: "lesson-list" }, list("conversation"))));
 }
 
 /* ---------- Boot ---------- */
